@@ -973,6 +973,8 @@ window.__switchView = function(){};
       <button type="button" id="import-billing-backup-btn" class="btn btn-outline-line" style="flex:1;">⬆ Import Backup</button>
     </div>
     <input type="file" id="import-billing-backup-file" accept="application/json,.json" style="display:none;">
+    <button type="button" id="merge-billing-backup-btn" class="btn btn-gold" style="width:100%; margin-top:8px;">➕ Add Bills from Old Phone (keeps current bills)</button>
+    <input type="file" id="merge-billing-backup-file" accept="application/json,.json" style="display:none;">
     <p id="billing-backup-status" style="font-family:Arial,sans-serif; font-size:13px; font-weight:700; color:var(--brass-light); margin:10px 0 0;"></p>
   </div>
 
@@ -1458,6 +1460,72 @@ billingBackupFile.addEventListener('change', async (e) => {
   } catch (err) {
     console.error(err);
     alert('Restore failed: ' + (err && err.message ? err.message : err));
+  }
+});
+
+// ---- Add bills from an old phone / old backup WITHOUT removing current bills ----
+const mergeBackupFile = document.getElementById('merge-billing-backup-file');
+document.getElementById('merge-billing-backup-btn').addEventListener('click', () => mergeBackupFile.click());
+mergeBackupFile.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  mergeBackupFile.value = '';
+  if (!file) return;
+  let backup;
+  try { backup = JSON.parse(await file.text()); } catch (err) { alert('That file could not be read.'); return; }
+  if (!backup || backup.type !== 'shop-billing-backup' || !backup.entries){ alert('That is not a billing backup file.'); return; }
+  let oldBills;
+  try { oldBills = JSON.parse(backup.entries['all-bills'] || '[]'); if (!Array.isArray(oldBills)) throw new Error('bad'); }
+  catch (err) { alert('No bills could be read from that file.'); return; }
+  if (!oldBills.length){ alert('That file has no bills in it.'); return; }
+  if (!confirm('Add ' + oldBills.length + ' bill(s) from this file to your current bills?\n\nNothing is deleted. Bills that are already here are skipped.')) return;
+  try {
+    billingBackupStatus.textContent = '⏳ Adding old bills...';
+    if (billMigrationPromise) await billMigrationPromise;
+    // Read the CURRENT bills fresh from the cloud — if that fails, stop (never overwrite blindly).
+    const curR = await storage.get('all-bills');
+    const current = curR && curR.value ? JSON.parse(curR.value) : [];
+    const sig = b => [b.invoiceNo, b.date, (b.customerName || '').trim().toLowerCase(), String(b.customerPhone || '').replace(/\D/g, ''), b.total, (b.items || []).length].join('|');
+    const haveSig = new Set(current.map(sig));
+    const haveId = new Set(current.map(b => String(b.id)));
+    let maxId = current.reduce((m, b) => Math.max(m, Number(b.id) || 0), Date.now());
+    const added = [];
+    let skipped = 0;
+    for (const b of oldBills){
+      if (!b || typeof b !== 'object'){ continue; }
+      if (haveSig.has(sig(b))){ skipped++; continue; }
+      const nb = { ...b };
+      if (nb.id == null || haveId.has(String(nb.id))) nb.id = ++maxId;
+      haveId.add(String(nb.id)); haveSig.add(sig(nb));
+      added.push(nb);
+    }
+    // Photos used by those bills (saved separately) — save them first.
+    const photoPairs = Object.entries(backup.entries).filter(([k]) => k.startsWith('bphoto:'));
+    if (photoPairs.length) await storage.setMany(photoPairs);
+    if (added.length){
+      const merged = current.concat(added).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || ((Number(b.id) || 0) - (Number(a.id) || 0)));
+      await storage.set('all-bills', JSON.stringify(merged));
+      // Keep the invoice counter ahead of every bill number.
+      const cR = await storage.get('invoice-counter').catch(() => null);
+      const curCounter = parseInt(cR && cR.value, 10) || 1;
+      const maxNo = merged.reduce((m, b) => Math.max(m, parseInt(b.invoiceNo, 10) || 0), 0);
+      if (maxNo + 1 > curCounter) await storage.set('invoice-counter', String(maxNo + 1));
+    }
+    // Customers: add the old phone's saved customers + everyone on the old bills.
+    if (!customersLoaded) await loadSavedCustomers();
+    if (customersLoaded){
+      let changed = false;
+      let oldCustomers = [];
+      try { oldCustomers = (JSON.parse(backup.entries['saved-customers'] || '{}').customers) || []; } catch (err) {}
+      oldCustomers.forEach(c => { if (upsertCustomer(savedCustomers, c.name, c.phone, c.address, 0)) changed = true; });
+      oldBills.forEach(b => { if (b && upsertCustomer(savedCustomers, b.customerName, b.customerPhone, b.customerAddress, 0)) changed = true; });
+      if (changed) await saveCustomersToCloud();
+    }
+    alert('✅ Added ' + added.length + ' old bill(s)' + (skipped ? ' (' + skipped + ' were already here, skipped)' : '') + '.\nThe app will now reload.');
+    location.reload();
+  } catch (err) {
+    console.error(err);
+    billingBackupStatus.textContent = '';
+    alert('Could not add the bills: ' + (err && err.message ? err.message : err) + '\nNothing was removed. Check your internet and try again.');
   }
 });
 

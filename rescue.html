@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Old Bills Rescue</title>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<style>
+  :root { --bg:#0b0b0b; --card:#161616; --line:#2c2c2c; --gold:#f0c43f; --text:#f2f2f2; --muted:#a8a8a8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; padding:16px; }
+  h1 { color:var(--gold); font-size:22px; margin:6px 0 4px; letter-spacing:1px; }
+  p.lead { color:var(--muted); font-size:14px; line-height:1.45; margin:0 0 14px; }
+  .card { background:var(--card); border:1.5px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .card h2 { font-size:16px; margin:0 0 6px; }
+  .card .info { font-size:14px; color:var(--muted); line-height:1.5; white-space:pre-line; }
+  .card.found { border-color:var(--gold); }
+  button { width:100%; margin-top:10px; background:var(--gold); color:#000; border:none; border-radius:8px; padding:13px; font-size:15px; font-weight:800; }
+  button[disabled] { opacity:.5; }
+  #status { color:var(--gold); font-weight:700; font-size:14px; margin:6px 0 14px; }
+</style>
+</head>
+<body>
+<h1>🛟 OLD BILLS RESCUE</h1>
+<p class="lead">This page looks for bills saved by old versions of your Billing app and saves them as a backup file. It only <b>reads</b> — it never changes or deletes anything.</p>
+<div id="status">⏳ Searching...</div>
+<div id="results"></div>
+
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+const BILLING_KEYS = /^(all-bills|invoice-counter|shop-settings|saved-customers|last-bill-made-by|round-off-default|bphoto:)/;
+const resultsEl = document.getElementById('results');
+const statusEl = document.getElementById('status');
+const sources = [];
+
+function fmtDate(d){ if (!d) return ''; const p = String(d).slice(0, 10).split('-'); return p.length === 3 ? p[2] + '-' + p[1] + '-' + p[0] : d; }
+
+function addSource(title, entries, note){
+  const keep = {};
+  Object.keys(entries).forEach(k => { if (BILLING_KEYS.test(k) && entries[k] != null) keep[k] = String(entries[k]); });
+  let bills = [];
+  try { bills = JSON.parse(keep['all-bills'] || '[]'); if (!Array.isArray(bills)) bills = []; } catch (e) { bills = []; }
+  let customers = 0;
+  try { customers = (JSON.parse(keep['saved-customers'] || '{}').customers || []).length; } catch (e) {}
+  const card = document.createElement('div');
+  card.className = 'card' + (bills.length ? ' found' : '');
+  let info;
+  if (bills.length){
+    const dates = bills.map(b => b.date).filter(Boolean).sort();
+    const sample = bills.slice(0, 5).map(b => '• #' + (b.invoiceNo || '?') + ' ' + (b.customerName || '(no name)') + (b.total != null ? ' — ₹' + b.total : '') + (b.date ? ' (' + fmtDate(b.date) + ')' : '')).join('\n');
+    info = '✅ ' + bills.length + ' bill(s) found' + (customers ? ', ' + customers + ' saved customer(s)' : '') +
+      (dates.length ? '\nFrom ' + fmtDate(dates[0]) + ' to ' + fmtDate(dates[dates.length - 1]) : '') + '\n' + sample + (bills.length > 5 ? '\n…and ' + (bills.length - 5) + ' more' : '');
+  } else {
+    info = note || 'No bills here.';
+  }
+  card.innerHTML = '<h2></h2><div class="info"></div>';
+  card.querySelector('h2').textContent = title;
+  card.querySelector('.info').textContent = info;
+  if (bills.length){
+    const btn = document.createElement('button');
+    btn.textContent = '⬇ Save these ' + bills.length + ' bills as a backup file';
+    btn.addEventListener('click', () => {
+      let shopName = '';
+      try { shopName = JSON.parse(keep['shop-settings'] || '{}').name || ''; } catch (e) {}
+      const backup = { type: 'shop-billing-backup', version: 1, exportedAt: new Date().toISOString(), shopName, rescuedFrom: title, entries: keep };
+      const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const t = new Date();
+      a.download = 'old-bills-backup-' + t.getDate() + '-' + (t.getMonth() + 1) + '-' + t.getFullYear() + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      btn.textContent = '✅ Saved — check your Downloads folder';
+    });
+    card.appendChild(btn);
+    sources.push(title);
+  }
+  resultsEl.appendChild(card);
+}
+
+// ---- 1) Bills saved on THIS phone by the offline Billing app (IndexedDB) ----
+function readAllFromStore(db, storeName){
+  return new Promise((resolve) => {
+    const out = {};
+    try {
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).openCursor();
+      req.onsuccess = () => { const c = req.result; if (c){ out[String(c.key)] = c.value; c.continue(); } else resolve(out); };
+      req.onerror = () => resolve(out);
+    } catch (e) { resolve(out); }
+  });
+}
+function openDb(name){
+  return new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open(name); } catch (e) { resolve(null); return; }
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+    req.onblocked = () => resolve(null);
+    req.onupgradeneeded = () => { /* DB did not exist — nothing created that matters */ };
+  });
+}
+// Finds Firestore documents in the phone's offline Firestore copy (old cloud app).
+function collectFirestoreDocs(value, found){
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)){ value.forEach(v => collectFirestoreDocs(v, found)); return; }
+  if (typeof value.name === 'string' && value.fields && /\/billing_kv\/[^/]+$/.test(value.name)){
+    const id = value.name.split('/billing_kv/')[1];
+    const f = value.fields;
+    found[id] = {
+      value: f.value && f.value.stringValue,
+      part: f.part && f.part.stringValue,
+      chunked: !!(f.chunked && f.chunked.booleanValue),
+      chunkCount: f.chunkCount ? Number(f.chunkCount.integerValue || 0) : 0
+    };
+    return;
+  }
+  Object.keys(value).forEach(k => collectFirestoreDocs(value[k], found));
+}
+function assembleDocs(docs){
+  const out = {};
+  Object.keys(docs).forEach(id => {
+    if (id.indexOf('__chunk') !== -1) return;
+    const d = docs[id];
+    const key = id.replace(/_SLASH_/g, '/');
+    if (!d.chunked){ if (d.value != null) out[key] = d.value; return; }
+    let s = '', ok = true;
+    for (let i = 0; i < d.chunkCount; i++){ const p = docs[id + '__chunk' + i]; if (!p || p.part == null){ ok = false; break; } s += p.part; }
+    if (ok) out[key] = s;
+  });
+  return out;
+}
+
+async function scanPhone(){
+  let names = [];
+  try {
+    if (indexedDB.databases) names = (await indexedDB.databases()).map(d => d.name).filter(Boolean);
+  } catch (e) {
+    addSource('📱 On this phone', {}, '⚠️ This phone did not allow reading saved data here (' + (e && e.message ? e.message : e) + ').');
+    return;
+  }
+  if (!names.length) names = ['shopapp-billing'];
+  let any = false;
+  for (const name of names){
+    const db = await openDb(name);
+    if (!db) continue;
+    const stores = Array.from(db.objectStoreNames);
+    if (stores.includes('kv')){
+      const entries = await readAllFromStore(db, 'kv');
+      if (entries['all-bills'] != null){ addSource('📱 On this phone (offline Billing app)', entries); any = true; }
+    } else if (/firestore/i.test(name)){
+      const docs = {};
+      for (const s of ['remoteDocuments', 'remoteDocumentsV14', 'mutations']){
+        if (stores.includes(s)) collectFirestoreDocs(await readAllFromStore(db, s), docs);
+      }
+      const entries = assembleDocs(docs);
+      if (entries['all-bills'] != null){ addSource('📱 On this phone (old cloud app\'s saved copy)', entries); any = true; }
+    }
+    db.close();
+  }
+  if (!any) addSource('📱 On this phone', {}, 'No bills saved on this phone in this place.');
+}
+
+// ---- 2) Bills in the cloud (old cloud Shop App / new cloud Billing app) ----
+async function scanCloud(){
+  try {
+    firebase.initializeApp(firebaseConfig);
+    const snap = await Promise.race([
+      firebase.firestore().collection('billing_kv').get(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('No internet / timed out')), 25000))
+    ]);
+    const docs = {};
+    snap.docs.forEach(d => { const x = d.data() || {}; docs[d.id] = { value: x.value, part: x.part, chunked: !!x.chunked, chunkCount: x.chunkCount || 0 }; });
+    addSource('☁️ In the cloud', assembleDocs(docs));
+  } catch (e) {
+    addSource('☁️ In the cloud', {}, '⚠️ Could not check the cloud: ' + (e && e.message ? e.message : e));
+  }
+}
+
+(async () => {
+  await scanPhone();
+  await scanCloud();
+  statusEl.textContent = sources.length
+    ? '✅ Done. Tap the yellow button under the bills you want to keep.'
+    : '❌ No old bills were found here. Try opening this page exactly the same way you open the old app.';
+})();
+</script>
+</body>
+</html>
