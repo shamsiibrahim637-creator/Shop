@@ -1240,6 +1240,7 @@ deleteCatalogueBtn.addEventListener('click', async () => {
     const r = await storage.get(idx, true).catch(() => null);
     const ids = r && r.value ? JSON.parse(r.value) : [];
     await Promise.all(ids.map(id => storage.delete(itemKey(currentCatalogueId, id), true).catch(() => null)));
+    await Promise.all(ids.map(id => storage.delete(photoKey(currentCatalogueId, id)).catch(() => null)));
     await storage.delete(idx, true).catch(() => null);
   } catch (err) {
     console.error(err);
@@ -1275,8 +1276,14 @@ function backupDateStamp(){
 async function readCatalogueItems(catId){
   const idx = await storage.get(indexKey(catId));
   const ids = idx && idx.value ? JSON.parse(idx.value) : [];
-  const loaded = await Promise.all(ids.map(id => storage.get(itemKey(catId, id)).then(r => (r && r.value ? JSON.parse(r.value) : null))));
-  return loaded.filter(Boolean);
+  const loaded = (await Promise.all(ids.map(id => storage.get(itemKey(catId, id)).then(r => (r && r.value ? JSON.parse(r.value) : null))))).filter(Boolean);
+  // Backups carry the full-size photos.
+  await Promise.all(loaded.map(async it => {
+    if (it.dataUrl) return;
+    const r = await storage.get(photoKey(catId, it.id));
+    it.dataUrl = r && r.value ? r.value : (it.thumb || '');
+  }));
+  return loaded.map(it => { const c = { ...it }; delete c.thumb; delete c.hasPhoto; return c; });
 }
 
 exportDataBtn.addEventListener('click', async () => {
@@ -1284,7 +1291,10 @@ exportDataBtn.addEventListener('click', async () => {
     if (itemsLoadFailed || unloadedIds.length){ alert('This catalogue did not load fully — tap ↻ Refresh first, then export.'); return; }
     const current = catalogues.find(c => c.id === currentCatalogueId);
     const name = current ? current.name : 'Catalogue';
-    downloadJsonFile({ type: 'trophy-catalogue-backup', catalogueName: name, items: items }, name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '-backup.json');
+    await loadFullPhotosInto(items);
+    statusEl.textContent = '';
+    const fullItems = items.map(it => { const c = { ...it }; delete c.thumb; delete c.hasPhoto; return c; });
+    downloadJsonFile({ type: 'trophy-catalogue-backup', catalogueName: name, items: fullItems }, name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '-backup.json');
   } catch (err) {
     console.error(err);
     alert('Could not create backup file.');
@@ -1301,7 +1311,7 @@ document.getElementById('export-all-btn').addEventListener('click', async () => 
     for (let i = 0; i < catalogues.length; i++){
       const cat = catalogues[i];
       btn.textContent = '⏳ Reading ' + cat.name + ' (' + (i + 1) + ' of ' + catalogues.length + ')...';
-      const catItems = (cat.id === currentCatalogueId && !itemsLoadFailed && !unloadedIds.length) ? items : await readCatalogueItems(cat.id);
+      const catItems = await readCatalogueItems(cat.id);
       out.push({ catalogueName: cat.name, items: catItems });
       total += catItems.length;
     }
@@ -1349,11 +1359,17 @@ async function importOneCatalogue(name, srcItems, replaceCat){
     catalogues.push(cat);
     await saveCatalogueList();
   }
-  await storage.setMany(prepared.map(it => [itemKey(cat.id, it.id), JSON.stringify(it)]));
+  const pairs = [];
+  for (const it of prepared){
+    const { light, full } = await splitItem(it);
+    if (full) pairs.push([photoKey(cat.id, it.id), full]);
+    pairs.push([itemKey(cat.id, it.id), JSON.stringify(light)]);
+  }
+  await storage.setMany(pairs);
   const newIds = prepared.map(it => it.id);
   await storage.set(indexKey(cat.id), JSON.stringify(newIds), true);
   const keep = new Set(newIds.map(String));
-  await Promise.all(oldIds.filter(id => !keep.has(String(id))).map(id => storage.delete(itemKey(cat.id, id), true).catch(() => null)));
+  await Promise.all(oldIds.filter(id => !keep.has(String(id))).map(id => Promise.all([storage.delete(itemKey(cat.id, id), true).catch(() => null), storage.delete(photoKey(cat.id, id)).catch(() => null)])));
   return { cat, count: prepared.length, failed };
 }
 
@@ -1361,6 +1377,7 @@ async function deleteWholeCatalogue(cat){
   const idx = await storage.get(indexKey(cat.id)).catch(() => null);
   const ids = idx && idx.value ? JSON.parse(idx.value) : [];
   await Promise.all(ids.map(id => storage.delete(itemKey(cat.id, id), true).catch(() => null)));
+  await Promise.all(ids.map(id => storage.delete(photoKey(cat.id, id)).catch(() => null)));
   await storage.delete(indexKey(cat.id), true).catch(() => null);
   catalogues = catalogues.filter(c => c.id !== cat.id);
   await saveCatalogueList();
@@ -1442,6 +1459,125 @@ importFileInput.addEventListener('change', async (e) => {
 let loadSeq = 0;
 let itemsLoadFailed = false;
 let unloadedIds = [];
+// ---- Fast loading: small thumbnails on the cards, full photos kept separately ----
+// Each product record keeps only a small thumbnail (~30 KB) for the cards.
+// The full-size photo is saved in its own record ("photo:<catalogue>:<product>")
+// and is only downloaded when really needed (PDF export, photo download,
+// backups). Products saved the old way (full photo inside the record) are
+// converted automatically in the background, once.
+const photoKey = (catId, itemId) => 'photo:' + catId + ':' + itemId;
+const fullPhotoCache = new Map();  // photoKey -> full photo
+const photoDirty = new Set();      // product ids whose full photo still has to be saved
+
+function itemPhoto(item){ return (item && (item.thumb || item.dataUrl)) || ''; }
+
+function makeThumb(dataUrl){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 360;
+      const scale = Math.min(1, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+      const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+      const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(c.toDataURL("image/jpeg", 0.7));
+    };
+    img.onerror = () => reject(new Error('Could not read photo'));
+    img.src = dataUrl;
+  });
+}
+
+// Light record (thumbnail only) + the full photo, ready to save separately.
+async function splitItem(item){
+  const light = { ...item };
+  const full = light.dataUrl || '';
+  delete light.dataUrl;
+  if (full && !light.thumb){
+    try { light.thumb = await makeThumb(full); }
+    catch (e) { return { light: { ...item }, full: '' }; } // photo unreadable: keep it the old way, never lose it
+  }
+  if (full) light.hasPhoto = true;
+  return { light, full };
+}
+
+async function fetchFullPhoto(catId, item){
+  if (item.dataUrl) return item.dataUrl;
+  const k = photoKey(catId, item.id);
+  if (fullPhotoCache.has(k)) return fullPhotoCache.get(k);
+  let v = '';
+  try { const r = await storage.get(k); v = r && r.value ? r.value : ''; } catch (e) { console.error(e); }
+  if (!v) v = item.thumb || '';  // fall back to the thumbnail rather than nothing
+  fullPhotoCache.set(k, v);
+  return v;
+}
+
+// Puts the full photos onto these products (in memory only) — used before
+// PDF / photo / backup exports. Shows progress in the status line.
+async function loadFullPhotosInto(list, catId){
+  catId = catId || currentCatalogueId;
+  let done = 0;
+  const need = list.filter(it => !it.dataUrl);
+  await Promise.all(need.map(async it => {
+    it.dataUrl = await fetchFullPhoto(catId, it);
+    done++;
+    if (need.length > 3) statusEl.textContent = '⏳ Getting full-size photos ' + done + ' of ' + need.length + '...';
+  }));
+}
+
+// One-time background conversion of products saved the old way.
+async function convertOldProducts(catId, list, showProgress){
+  const pending = list.filter(it => it.dataUrl && !it.thumb);
+  let done = 0;
+  for (let i = 0; i < pending.length; i += 8){
+    const chunk = pending.slice(i, i + 8);
+    const photoPairs = [], lightPairs = [], converted = [];
+    for (const it of chunk){
+      try {
+        const { light, full } = await splitItem(it);
+        if (!full || !light.thumb) continue; // could not make a thumbnail: leave this one as it is
+        photoPairs.push([photoKey(catId, it.id), full]);
+        lightPairs.push([itemKey(catId, it.id), JSON.stringify(light)]);
+        converted.push([it, light.thumb, full]);
+      } catch (e) { console.error('Could not convert', it && it.name, e); }
+    }
+    try {
+      await storage.setMany(photoPairs);  // full photos are safely saved FIRST...
+      await storage.setMany(lightPairs);  // ...only then the light records drop the photo
+      converted.forEach(([it, thumb, full]) => { it.thumb = thumb; it.hasPhoto = true; photoDirty.delete(it.id); fullPhotoCache.set(photoKey(catId, it.id), full); });
+    }
+    catch (e) { console.error('Conversion paused (will retry next time):', e); return false; }
+    done += chunk.length;
+    if (showProgress && catId === currentCatalogueId) syncText.textContent = '⚡ Making this catalogue load faster... ' + done + ' of ' + pending.length;
+  }
+  if (showProgress && catId === currentCatalogueId && pending.length) syncText.textContent = 'Saved ✓';
+  return true;
+}
+
+// After the open catalogue is done, quietly convert the other catalogues too
+// (so Billing search gets faster as well). Runs once per app open.
+let convertAllStarted = false;
+async function convertOtherCatalogues(){
+  if (convertAllStarted) return;
+  convertAllStarted = true;
+  for (const cat of catalogues.slice()){
+    if (cat.id === currentCatalogueId) continue;
+    const doneFlag = 'shopapp-fast-' + cat.id;
+    try { if (localStorage.getItem(doneFlag)) continue; } catch (e) {}
+    try {
+      const idx = await storage.get(indexKey(cat.id));
+      const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+      const list = (await Promise.all(ids.map(id => storage.get(itemKey(cat.id, id)).then(r => (r && r.value ? JSON.parse(r.value) : null)).catch(() => null)))).filter(Boolean);
+      const ok = await convertOldProducts(cat.id, list, false);
+      if (ok && list.every(it => !it.dataUrl || it.thumb)) { try { localStorage.setItem(doneFlag, '1'); } catch (e) {} }
+    } catch (e) { console.error('Background conversion skipped for', cat.name, e); }
+  }
+}
+
 async function loadItemsFromStorage(silent){
   const seq = ++loadSeq;
   const catId = currentCatalogueId;
@@ -1461,6 +1597,7 @@ async function loadItemsFromStorage(silent){
     if (seq !== loadSeq || catId !== currentCatalogueId) return;
 
     items = loaded.filter(Boolean);
+    items.forEach(it => { if (it.dataUrl && !it.thumb) photoDirty.add(it.id); }); // old-style product: full photo not saved separately yet
     unloadedIds = ids.filter((id, i) => loaded[i] === null);
     itemsLoadFailed = false;
     syncText.style.color = '';
@@ -1470,6 +1607,8 @@ async function loadItemsFromStorage(silent){
     if (editingId === null){
       renderGrid();
     }
+    // Convert old-style products in the background (only the first time).
+    convertOldProducts(catId, items, true).then(convertOtherCatalogues).catch(e => console.error(e));
   } catch (err) {
     console.error(err);
     if (seq !== loadSeq || catId !== currentCatalogueId) return;
@@ -1497,7 +1636,17 @@ async function saveItemToStorage(item){
   }
   try {
     syncText.textContent = 'Saving...';
-    const result = await storage.set(itemKey(currentCatalogueId, item.id), JSON.stringify(item), true);
+    const catId = currentCatalogueId;
+    const { light, full } = await splitItem(item);
+    // Save the full photo first (only when it's new or changed), then the light record.
+    if (full && photoDirty.has(item.id)){
+      await storage.set(photoKey(catId, item.id), full);
+      fullPhotoCache.set(photoKey(catId, item.id), full);
+      photoDirty.delete(item.id);
+    }
+    item.thumb = light.thumb;
+    if (light.hasPhoto) item.hasPhoto = true;
+    const result = await storage.set(itemKey(catId, item.id), JSON.stringify(light), true);
     if (!result) throw new Error('save failed');
     await saveIndex();
     syncText.textContent = 'Saved ✓';
@@ -1511,6 +1660,7 @@ async function deleteItemFromStorage(id){
   try {
     syncText.textContent = 'Saving...';
     await storage.delete(itemKey(currentCatalogueId, id), true).catch(() => null);
+    storage.delete(photoKey(currentCatalogueId, id)).catch(() => null);
     await saveIndex();
     syncText.textContent = 'Saved ✓';
   } catch (err) {
@@ -1683,7 +1833,7 @@ searchBtn.addEventListener('click', async () => {
     const scored = await Promise.all(items.map(async (item) => {
       let hash = item.hash;
       if (!hash){
-        hash = await computeImageHash(item.dataUrl);
+        hash = await computeImageHash(itemPhoto(item));
         item.hash = hash; // cache in memory; also persisted lazily below
         saveItemToStorage(item);
       }
@@ -1702,7 +1852,7 @@ searchBtn.addEventListener('click', async () => {
       ).join(', ');
       return `
         <div style="display:flex; gap:12px; align-items:center; background:var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px;">
-          <img src="${item.dataUrl}" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;">
+          <img src="${itemPhoto(item)}" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;">
           <div style="flex:1; font-family:Arial,sans-serif;">
             <p style="margin:0 0 2px; font-size:16px; font-weight:800; color:var(--cream);">${escapeHtml(item.name)}</p>
             ${sizeText ? `<p style="margin:0; font-size:13px; font-weight:700; color:#c9c9c9;">${escapeHtml(sizeText)}</p>` : ''}
@@ -1984,6 +2134,7 @@ addBtn.addEventListener('click', () => {
     };
     items.push(savedItem);
   }
+  photoDirty.add(savedItem.id);
 
   resetForm();
   renderGrid();
@@ -2172,7 +2323,7 @@ function startInlineEdit(id){
   inlineEditId = id;
   inlineDraft = {
     name: item.name || '',
-    dataUrl: item.dataUrl,
+    newPhoto: null,
     variations: (item.variations || []).map(v => ({ ...v }))
   };
   if (!inlineDraft.variations.length) inlineDraft.variations.push({ code: '', inch: '', price: '' });
@@ -2217,7 +2368,7 @@ function buildInlineEditor(item){
       </div>
     </div>
   `;
-  card.querySelector('.ie-img').src = d.dataUrl;
+  card.querySelector('.ie-img').src = d.newPhoto || itemPhoto(item);
   const nameIn = card.querySelector('.ie-name');
   nameIn.value = d.name;
   nameIn.addEventListener('input', () => { d.name = nameIn.value; });
@@ -2257,7 +2408,7 @@ function buildInlineEditor(item){
     const file = photoFile.files[0];
     if (!file) return;
     try {
-      d.dataUrl = await compressImage(file, 1000, 0.72);
+      d.newPhoto = await compressImage(file, 1000, 0.72);
       renderGrid();
     } catch (e) {
       console.error(e);
@@ -2276,8 +2427,14 @@ function buildInlineEditor(item){
       .filter(v => v.code || v.inch || v.price);
     const idx = items.findIndex(i => i.id === item.id);
     if (idx === -1){ closeInlineEdit(); return; }
-    const updated = { ...items[idx], name, dataUrl: d.dataUrl, variations };
-    if (d.dataUrl !== items[idx].dataUrl) delete updated.hash; // photo changed — matching fingerprint is rebuilt when needed
+    const updated = { ...items[idx], name, variations };
+    if (d.newPhoto){ // photo changed: new full photo + new thumbnail; matching fingerprint is rebuilt when needed
+      updated.dataUrl = d.newPhoto;
+      delete updated.thumb;
+      delete updated.hash;
+      fullPhotoCache.delete(photoKey(currentCatalogueId, item.id));
+      photoDirty.add(item.id);
+    }
     items[idx] = updated;
     inlineEditId = null;
     inlineDraft = null;
@@ -2339,7 +2496,7 @@ function renderGrid(){
     card.innerHTML = `
       ${isFiltering ? '' : `<div class="drag-handle" data-id="${item.id}">⠿ Hold &amp; drag to reorder</div>`}
       <div style="position:relative;">
-        <img src="${item.dataUrl}" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
+        <img src="${itemPhoto(item)}" loading="lazy" decoding="async" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
         ${item.outOfStock ? `<div style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; pointer-events:none;"><span style="background:rgba(179,70,44,0.92); color:#fff; font-family:Arial,sans-serif; font-weight:800; font-size:13px; padding:5px 12px; border-radius:5px; transform:rotate(-12deg); letter-spacing:0.5px;">OUT OF STOCK</span></div>` : ''}
         <button type="button" class="download-photo-btn" data-id="${item.id}" title="Download this photo" style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.7); border:1.5px solid var(--brass-light); color:var(--brass-light); border-radius:5px; padding:5px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">⬇</button>
       </div>
@@ -2382,13 +2539,13 @@ function renderGrid(){
   });
 
   __viewRoot.querySelectorAll('.download-photo-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const id = Number(btn.getAttribute('data-id'));
       const item = items.find(i => i.id === id);
       if (!item) return;
       const safeName = item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'photo';
       const a = document.createElement('a');
-      a.href = item.dataUrl;
+      a.href = await fetchFullPhoto(currentCatalogueId, item);
       a.download = safeName + '.jpg';
       document.body.appendChild(a);
       a.click();
@@ -2481,6 +2638,7 @@ exportBtn.addEventListener('click', async () => {
     return;
   }
   exportBtn.disabled = true;
+  try { await loadFullPhotosInto(items); } catch (e) { console.error(e); }
   statusEl.textContent = 'Generating PDF...';
 
   try {
@@ -2654,6 +2812,7 @@ exportOosBtn.addEventListener('click', async () => {
     alert('Nothing is currently marked Out of Stock in this catalogue.');
     return;
   }
+  try { await loadFullPhotosInto(entries.map(e => e.item)); } catch (e) { console.error(e); }
 
   try {
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -2767,6 +2926,7 @@ exportPhotosBtn.addEventListener('click', async () => {
   try {
     statusEl.textContent = 'Preparing photos...';
     exportPhotosBtn.disabled = true;
+    await loadFullPhotosInto(items);
 
     const currentCat = catalogues.find(c => c.id === currentCatalogueId);
     const zip = new JSZip();
@@ -2857,10 +3017,10 @@ window.__getCatalogueProducts = async function(onBatch){
         const itemProducts = [];
         if (item.variations && item.variations.length){
           item.variations.filter(v => !v.outOfStock).forEach(v => {
-            itemProducts.push({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.dataUrl || '' });
+            itemProducts.push({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: itemPhoto(item) });
           });
         } else {
-          itemProducts.push({ name: item.name, code: '', inch: '', price: '', catalogueName: cat.name, photo: item.dataUrl || '' });
+          itemProducts.push({ name: item.name, code: '', inch: '', price: '', catalogueName: cat.name, photo: itemPhoto(item) });
         }
         products.push(...itemProducts);
         if (onBatch && itemProducts.length){
@@ -2889,11 +3049,11 @@ window.__findMatchingProducts = async function(queryDataUrl, topN){
         const item = JSON.parse(r.value);
         let hash = item.hash;
         if (!hash){
-          try { hash = await computeImageHash(item.dataUrl); } catch (e) { continue; }
+          try { hash = await computeImageHash(itemPhoto(item)); } catch (e) { continue; }
         }
         const distance = hammingDistance(queryHash, hash);
         const similarity = Math.round((1 - distance / queryHash.length) * 100);
-        scored.push({ name: item.name, variations: item.variations || [], catalogueName: cat.name, photo: item.dataUrl || '', similarity });
+        scored.push({ name: item.name, variations: item.variations || [], catalogueName: cat.name, photo: itemPhoto(item), similarity });
       }
     } catch (e) { /* skip this catalogue if something's off */ }
   }

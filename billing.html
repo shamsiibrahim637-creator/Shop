@@ -1372,7 +1372,7 @@ async function readCloudCatalogueProducts(onBatch){
         try { item = JSON.parse(r.value); } catch (e) { return; }
         if (item.outOfStock) return;
         const vars = item.variations && item.variations.length ? item.variations : [{}];
-        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.dataUrl || '' }));
+        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.thumb || item.dataUrl || '' }));
         products.push(...out);
         if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
       })));
