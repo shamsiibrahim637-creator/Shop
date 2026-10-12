@@ -1,0 +1,2950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Catalogue">
+<title>Catalogue</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏆</text></svg>">
+<link rel="manifest" href="catalogue.webmanifest">
+<link rel="apple-touch-icon" href="catalogue-icon-192.png">
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<script>
+// ---- Firebase init (shared across all three apps for live cross-device sync) ----
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+window.__firebaseReady = false;
+try {
+  firebase.initializeApp(firebaseConfig);
+  window.__db = firebase.firestore();
+  // Keep a copy on the phone (only possible on a real web address) — faster
+  // repeat opens and it keeps working on a weak signal.
+  if (location.protocol === 'https:'){
+    window.__db.enablePersistence({ synchronizeTabs: true }).catch(err => console.warn('Offline copy not enabled:', err && err.code));
+  }
+  window.__firebaseReady = true;
+} catch (err) {
+  console.error('Firebase init failed:', err);
+}
+
+// ---- Shared cloud storage layer (Firestore), used by all three apps ------
+// Every app already talks to `storage.get/set/delete(key[, value])` exactly
+// like it did with IndexedDB — only the plumbing underneath changes.
+//
+// A single bill/purchase/catalogue-item list is saved as ONE JSON string
+// under one key (e.g. "all-bills"). Firestore caps a single document at
+// ~1MB, and that blob only grows over time as the shop's history builds up
+// — so instead of trying to keep photos small enough to always fit in one
+// document (which is what silently broke last time once the data grew),
+// large values are transparently split across several small "chunk"
+// documents and reassembled on read. This means saving can't silently fail
+// just because the data got big.
+const FIRESTORE_CHUNK_SIZE = 900000; // chars per chunk, safely under the ~1MB doc cap
+
+function makeFirestoreStorage(collectionName){
+  function coll(){ return window.__db.collection(collectionName); }
+  function safeId(key){ return String(key).replace(/\//g, '_SLASH_'); }
+  function chunkId(key, i){ return safeId(key) + '__chunk' + i; }
+
+  return {
+    async get(key){
+      const snap = await coll().doc(safeId(key)).get();
+      if (!snap.exists) return null;
+      const data = snap.data();
+      if (!data.chunked) return { key, value: data.value };
+      const n = data.chunkCount || 0;
+      const parts = await Promise.all(
+        Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get())
+      );
+      return { key, value: parts.map(p => (p.exists ? p.data().part : '')).join('') };
+    },
+    async set(key, value){
+      let prevChunkCount = 0;
+      try {
+        const prevSnap = await coll().doc(safeId(key)).get();
+        if (prevSnap.exists && prevSnap.data().chunked) prevChunkCount = prevSnap.data().chunkCount || 0;
+      } catch (e) { /* no previous doc — nothing to clean up */ }
+
+      const str = String(value);
+      if (str.length <= FIRESTORE_CHUNK_SIZE){
+        await coll().doc(safeId(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        if (prevChunkCount > 0){
+          await Promise.all(Array.from({ length: prevChunkCount }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+        return { key, value: str };
+      }
+
+      const chunks = [];
+      for (let i = 0; i < str.length; i += FIRESTORE_CHUNK_SIZE) chunks.push(str.slice(i, i + FIRESTORE_CHUNK_SIZE));
+      await Promise.all(chunks.map((part, i) => coll().doc(chunkId(key, i)).set({ part })));
+      await coll().doc(safeId(key)).set({ chunked: true, chunkCount: chunks.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      if (prevChunkCount > chunks.length){
+        await Promise.all(Array.from({ length: prevChunkCount - chunks.length }, (_, i) =>
+          coll().doc(chunkId(key, chunks.length + i)).delete().catch(() => {})
+        ));
+      }
+      return { key, value: str };
+    },
+    async delete(key){
+      try {
+        const snap = await coll().doc(safeId(key)).get();
+        if (snap.exists && snap.data().chunked){
+          const n = snap.data().chunkCount || 0;
+          await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+      } catch (e) { /* ignore — still try deleting the manifest below */ }
+      await coll().doc(safeId(key)).delete();
+      return { key, deleted: true };
+    },
+    async list(prefix){
+      return { keys: [] }; // not used by any app — kept only for interface compatibility
+    },
+    // Recovery helper: every saved value whose key starts with `prefix`
+    // (e.g. all products saved under one catalogue, even ones that have
+    // dropped out of its product list). Reassembles chunked values.
+    async listByPrefix(prefix){
+      const FP = firebase.firestore.FieldPath.documentId();
+      const start = safeId(prefix);
+      const snap = await coll().where(FP, '>=', start).where(FP, '<', start + '\uf8ff').get();
+      const out = [];
+      for (const d of snap.docs){
+        if (d.id.indexOf('__chunk') !== -1) continue;
+        const key = d.id.replace(/_SLASH_/g, '/');
+        const data = d.data() || {};
+        let value = null;
+        if (!data.chunked) value = data.value;
+        else { const r = await this.get(key); value = r ? r.value : null; }
+        if (value != null) out.push({ key, value });
+      }
+      return out;
+    },
+    // Bulk write for imports: writing hundreds of items one at a time (each
+    // a separate get-then-set round trip) is what actually broke large
+    // imports before — on a slow connection it can take so long the person
+    // assumes it's done and leaves the page, so only the first few items
+    // ever get saved. This uses Firestore's batch write instead, splitting
+    // batches by BOTH item count (max 400, Firestore's own per-batch limit)
+    // AND total data size (max ~8MB, safely under Firestore's ~10MB
+    // per-request cap) — photos mean a batch can hit the size limit long
+    // before it hits the count limit. Any single value still too big for
+    // one chunk falls back to the normal chunked set() afterwards.
+    async setMany(pairs){
+      const MAX_BATCH_OPS = 400;
+      const MAX_BATCH_BYTES = 8000000;
+      const overflow = [];
+      let batch = window.__db.batch();
+      let opsInBatch = 0;
+      let bytesInBatch = 0;
+
+      for (const [key, value] of pairs){
+        const str = String(value);
+        if (str.length > FIRESTORE_CHUNK_SIZE){ overflow.push([key, value]); continue; }
+
+        if (opsInBatch > 0 && (opsInBatch >= MAX_BATCH_OPS || bytesInBatch + str.length > MAX_BATCH_BYTES)){
+          await batch.commit();
+          batch = window.__db.batch();
+          opsInBatch = 0;
+          bytesInBatch = 0;
+        }
+
+        batch.set(coll().doc(safeId(key)), { chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        opsInBatch++;
+        bytesInBatch += str.length;
+      }
+      if (opsInBatch > 0) await batch.commit();
+
+      for (const [key, value] of overflow){
+        await this.set(key, value);
+      }
+    },
+    async getAllEntries(){ return this.listByPrefix(''); },
+    // Deletes everything in this collection except keepKeys.
+    async clearAll(keepKeys){
+      const keep = new Set(keepKeys || []);
+      const all = await this.listByPrefix('');
+      await Promise.all(all.filter(r => !keep.has(r.key)).map(r => this.delete(r.key).catch(() => null)));
+    },
+    // Real-time: cb(value) fires immediately with the current value, then
+    // again every time this key changes on any device. Returns an unsubscribe
+    // function.
+    onChange(key, cb){
+      return coll().doc(safeId(key)).onSnapshot(async (snap) => {
+        if (!snap.exists){ cb(null); return; }
+        const data = snap.data();
+        if (!data.chunked){ cb(data.value); return; }
+        const n = data.chunkCount || 0;
+        try {
+          const parts = await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get()));
+          cb(parts.map(p => (p.exists ? p.data().part : '')).join(''));
+        } catch (e) { console.error('Live update failed for', key, e); }
+      }, (err) => console.error('Live sync error for', key, err));
+    }
+  };
+}
+</script>
+<script>
+function makeLocalStorage(name){ return makeFirestoreStorage(name); }
+window.__switchView = function(){};
+</script>
+
+<style>
+
+  :root{
+    --brass: #b8912f;
+    --brass-light: #f0c341;
+    --navy: #050505;
+    --navy-2: #161616;
+    --cream: #ffffff;
+    --line: #3a3a3a;
+    --danger: #b3462c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--navy);
+    color: var(--cream);
+    min-height:100vh;
+  }
+  header{
+    padding: 30px 20px 22px;
+    text-align:center;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--navy-2), var(--navy));
+  }
+  header h1{
+    margin:0;
+    font-size: 32px;
+    letter-spacing: 1px;
+    color: var(--brass-light);
+    font-weight: 700;
+  }
+  header .medal{
+    font-size: 32px;
+    display:block;
+    margin-bottom: 8px;
+  }
+  header p{
+    margin: 10px 0 0;
+    font-family: Arial, sans-serif;
+    font-size: 15px;
+    font-weight:600;
+    color: var(--brass);
+    letter-spacing: 0.5px;
+  }
+  main{
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 16px 20px;
+  }
+  .add-card{
+    background: var(--navy-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 22px;
+  }
+  .add-card h2{
+    margin: 0 0 16px;
+    font-size: 18px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+  }
+  .field{
+    margin-bottom: 14px;
+  }
+  .field label{
+    display:block;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    font-weight:700;
+    color: var(--brass-light);
+    margin-bottom: 7px;
+  }
+  .field input[type="text"], .field input[type="number"]{
+    width:100%;
+    padding: 14px;
+    border-radius: 6px;
+    border: 1.5px solid var(--line);
+    background: var(--navy);
+    color: var(--cream);
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 20px;
+  }
+  .photo-input{
+    display:flex;
+    align-items:center;
+    gap: 12px;
+    flex-wrap:wrap;
+  }
+  .photo-input .upload-btn{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 13px 20px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 17px;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  .photo-input input[type="file"]{display:none;}
+  .native-file-input{
+    font-family: Arial, sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--cream);
+    width: 100%;
+    padding: 10px;
+    border: 1.5px solid var(--brass);
+    border-radius: 6px;
+    background: var(--navy);
+  }
+  .native-file-input::file-selector-button{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 12px 18px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    margin-right: 12px;
+  }
+  .native-file-input::-webkit-file-upload-button{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 12px 18px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    margin-right: 12px;
+  }
+  #preview-thumb, #pv-preview-thumb{
+    width:60px;height:60px;border-radius:6px;object-fit:cover;
+    border:1.5px solid var(--brass); display:none;
+  }
+  #add-btn, #pv-add-btn{
+    width:100%;
+    margin-top: 8px;
+    background: var(--brass-light);
+    color: #000;
+    border:none;
+    padding: 16px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 19px;
+    letter-spacing:0.5px;
+    cursor:pointer;
+  }
+  #add-btn:disabled, #pv-add-btn:disabled{opacity:0.5; cursor:not-allowed;}
+  .var-chip{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    background: var(--navy);
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    padding: 11px 12px;
+    margin-bottom: 8px;
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 18px;
+  }
+  .var-chip .var-remove{
+    background:none; border:none; color:#e0705a; cursor:pointer; font-size:15px; font-weight:800;
+  }
+
+  .list-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    margin-bottom: 14px;
+  }
+  .list-header h2{
+    font-size: 18px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+    margin:0;
+  }
+  .list-header span{
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 15px;
+    color: var(--brass);
+  }
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .item-card{
+    background: var(--navy-2);
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    overflow:hidden;
+  }
+  .item-card.dragging{
+    opacity: 0.5;
+    border-color: var(--brass-light);
+  }
+  .drag-handle{
+    background: var(--navy);
+    color: var(--brass-light);
+    text-align:center;
+    padding: 8px 4px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    cursor: grab;
+    touch-action: pan-y;
+    border-bottom: 1px solid var(--line);
+    user-select: none;
+  }
+  .item-card img{
+    width:100%; height:130px; object-fit:cover; display:block;
+    background:#000;
+  }
+  .item-body{
+    padding: 10px 12px 12px;
+    font-family: Arial, sans-serif;
+  }
+  .item-body .name{
+    font-size:18px; font-weight:800; color:var(--cream); margin:0 0 4px;
+    white-space:normal; overflow-wrap:break-word;
+  }
+  .item-body .price{
+    font-size:18px; color:var(--brass-light); font-weight:800; margin:0;
+  }
+  .card-actions{
+    display:flex;
+    flex-direction:column;
+  }
+  .card-actions .row{
+    display:flex;
+  }
+  .card-actions button{
+    flex:1;
+    background:none;
+    border:none;
+    border-top:1.5px solid var(--line);
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 13px;
+    padding: 10px 2px;
+    cursor:pointer;
+  }
+  .move-btn{
+    color: #c9c9c9;
+    border-right:1.5px solid var(--line);
+  }
+  .move-btn:last-child{
+    border-right:none;
+  }
+  .move-btn:disabled{
+    opacity:0.3;
+    cursor:not-allowed;
+  }
+  .pp-move-btn{
+    color: #c9c9c9;
+    border-right:1.5px solid var(--line);
+  }
+  .pp-move-btn:last-child{
+    border-right:none;
+  }
+  .pp-move-btn:disabled{
+    opacity:0.3;
+    cursor:not-allowed;
+  }
+  .edit-btn{
+    color: var(--brass-light);
+    border-right:1.5px solid var(--line);
+    font-size:15px;
+  }
+  .remove-btn{
+    color:#e0705a;
+    font-size:15px;
+  }
+  .empty-state{
+    text-align:center;
+    color:#8a8a8a;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    font-weight:600;
+    padding: 34px 12px;
+    border: 1.5px dashed var(--line);
+    border-radius: 10px;
+    margin-bottom: 24px;
+  }
+  .footer-bar{
+    background: var(--navy-2);
+    border-top: 1px solid var(--line);
+    padding: 14px 16px 24px;
+    display:flex;
+    justify-content:center;
+  }
+  #export-btn, #pv-export-btn{
+    width:100%;
+    background: var(--brass);
+    color: #000;
+    border:none;
+    padding: 17px;
+    border-radius: 8px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 19px;
+    letter-spacing:0.5px;
+    cursor:pointer;
+  }
+  #export-btn:disabled, #pv-export-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #export-excel-btn:disabled, #pv-export-excel-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #export-photos-btn:disabled, #pv-export-photos-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #status, #pv-status{
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:600;
+    color: var(--brass-light);
+    text-align:center;
+    margin-top: 10px;
+  }
+
+
+  :root{
+    --brass: #b8912f;
+    --brass-light: #f0c341;
+    --navy: #050505;
+    --navy-2: #161616;
+    --cream: #ffffff;
+    --line: #3a3a3a;
+    --danger: #b3462c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--navy);
+    color: var(--cream);
+    min-height:100vh;
+  }
+  header{
+    padding: 30px 20px 22px;
+    text-align:center;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--navy-2), var(--navy));
+  }
+  header .emoji{
+    font-size: 32px;
+    display:block;
+    margin-bottom: 8px;
+  }
+  header h1{
+    margin:0;
+    font-size: 30px;
+    letter-spacing: 1px;
+    color: var(--brass-light);
+    font-weight: 700;
+  }
+  header p{
+    margin: 10px 0 0;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:600;
+    color: var(--brass);
+  }
+  main{
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 16px 40px;
+  }
+  .card{
+    background: var(--navy-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 20px;
+  }
+  .card h2{
+    margin: 0 0 14px;
+    font-size: 17px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+  }
+  .field{
+    margin-bottom: 12px;
+  }
+  .field label{
+    display:block;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:700;
+    color: var(--brass-light);
+    margin-bottom: 6px;
+  }
+  .field input[type="text"], .field input[type="number"], .field input[type="date"]{
+    width:100%;
+    padding: 12px;
+    border-radius: 6px;
+    border: 1.5px solid var(--line);
+    background: var(--navy);
+    color: var(--cream);
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 16px;
+  }
+  .row2{
+    display:flex;
+    gap:10px;
+  }
+  .row2 .field{ flex:1; }
+  .btn{
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    border: none;
+  }
+  .btn-gold{ background: var(--brass-light); color:#000; }
+  .btn-outline{ background:none; border:1.5px solid var(--brass); color:var(--brass-light); }
+  .btn-outline-line{ background:none; border:1.5px solid var(--line); color:#c9c9c9; }
+  .btn-danger{ background:none; border:1.5px solid var(--danger); color:#e0705a; }
+  .btn:disabled{ opacity:0.4; cursor:not-allowed; }
+  .btn-full{ width:100%; }
+  .tabs{ display:flex; gap:8px; margin-bottom:14px; }
+  .tab-btn{
+    flex:1; padding:11px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800;
+    font-size:14px; cursor:pointer; border:1.5px solid var(--line); background:none; color:#c9c9c9;
+  }
+  .tab-btn.active{ border-color: var(--brass-light); color: var(--brass-light); background: rgba(240,195,65,0.08); }
+  .tab-panel{ display:none; }
+  .tab-panel.active{ display:block; }
+  .native-file-input{
+    font-family: Arial, sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--cream);
+    width: 100%;
+    padding: 10px;
+    border: 1.5px solid var(--brass);
+    border-radius: 6px;
+    background: var(--navy);
+  }
+  .native-file-input::file-selector-button{
+    background: var(--brass); color:#000; border:none; padding:11px 16px; border-radius:6px;
+    font-family: Arial, sans-serif; font-weight:800; font-size:14px; cursor:pointer; margin-right:12px;
+  }
+  .native-file-input::-webkit-file-upload-button{
+    background: var(--brass); color:#000; border:none; padding:11px 16px; border-radius:6px;
+    font-family: Arial, sans-serif; font-weight:800; font-size:14px; cursor:pointer; margin-right:12px;
+  }
+  .product-result{
+    background: var(--navy); border:1.5px solid var(--line); border-radius:6px; padding:10px; margin-bottom:8px; cursor:pointer;
+  }
+  .product-result:active{ border-color: var(--brass-light); }
+  .product-result .pname{ font-family:Arial,sans-serif; font-weight:800; font-size:15px; color:var(--cream); margin:0 0 4px; }
+  .product-result .psizes{ font-family:Arial,sans-serif; font-weight:700; font-size:13px; color:var(--brass-light); }
+  .size-chip{
+    display:inline-block; background: var(--navy-2); border:1.5px solid var(--brass); color:var(--brass-light);
+    border-radius:5px; padding:6px 10px; margin:4px 6px 0 0; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;
+  }
+  .size-chip.selected{ background: var(--brass-light); color:#000; }
+  .item-row{
+    display:flex; align-items:center; gap:8px; background:var(--navy); border:1.5px solid var(--line);
+    border-radius:6px; padding:10px; margin-bottom:8px; font-family:Arial,sans-serif;
+  }
+  .item-row .info{ flex:1; }
+  .item-row .iname{ font-weight:800; font-size:15px; color:var(--cream); margin:0; }
+  .item-row .isize{ font-weight:700; font-size:12px; color:#c9c9c9; margin:2px 0 0; }
+  .item-row input[type="number"]{
+    width:56px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream);
+    border-radius:5px; padding:6px; font-family:Arial,sans-serif; font-weight:800; font-size:14px;
+  }
+  .item-row .amount{ font-weight:800; font-size:15px; color:var(--brass-light); min-width:70px; text-align:right; }
+  .item-row .remove-item{ background:none; border:none; color:#e0705a; font-size:20px; cursor:pointer; padding:0 2px; }
+  .totals{ font-family:Arial,sans-serif; margin-top:10px; }
+  .totals .trow{ display:flex; justify-content:space-between; padding:6px 0; font-size:15px; font-weight:700; color:#c9c9c9; }
+  .totals .grand{ font-size:20px; font-weight:800; color:var(--brass-light); border-top:1.5px solid var(--line); margin-top:6px; padding-top:10px; }
+  .bill-card{
+    background: var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; font-family:Arial,sans-serif;
+  }
+  .bill-card .top{ display:flex; justify-content:space-between; align-items:baseline; }
+  .bill-card .inv{ font-weight:800; font-size:16px; color:var(--brass-light); }
+  .bill-card .amt{ font-weight:800; font-size:16px; color:var(--cream); }
+  .bill-card .meta{ font-size:13px; font-weight:600; color:#8a8a8a; margin:4px 0 10px; }
+  .bill-card .actions{ display:flex; gap:8px; }
+  .bill-card .actions button{ flex:1; padding:9px; font-size:12px; }
+  .status-pill{
+    display:inline-block; font-size:11px; font-weight:800; padding:3px 8px; border-radius:10px; margin-left:8px;
+  }
+  .status-paid{ background: rgba(76,175,80,0.2); color:#7cd992; }
+  .status-due{ background: rgba(224,112,90,0.2); color:#e0705a; }
+  .status-dispatched{ background: rgba(107,168,224,0.2); color:#6ba8e0; }
+  .status-notdispatched{ background: rgba(150,150,150,0.15); color:#9a9a9a; }
+  .bill-card .phone{ font-size:13px; font-weight:600; color:#8a8a8a; margin:-2px 0 4px; }
+  .bill-filter-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+  .bill-filter-chips .chip{
+    font-family:Arial,sans-serif; font-size:12px; font-weight:700; padding:6px 12px; border-radius:14px;
+    border:1.5px solid var(--line); background:transparent; color:#c9c9c9; cursor:pointer;
+  }
+  .bill-filter-chips .chip.active{ background: var(--brass); color:#000; border-color: var(--brass); }
+  #empty-bills{
+    text-align:center; color:#8a8a8a; font-family:Arial,sans-serif; font-size:15px; padding:24px 10px;
+    border:1.5px dashed var(--line); border-radius:10px;
+  }
+
+</style>
+</head>
+<body>
+<!-- ===== PIN lock: keeps casual visitors out of the app ===== -->
+<div id="pin-lock" style="position:fixed; inset:0; z-index:99999; background:#050505; display:flex; align-items:center; justify-content:center; padding:24px;">
+  <div style="width:100%; max-width:340px; text-align:center; font-family:Arial,sans-serif;">
+    <div style="font-size:44px; margin-bottom:6px;">🔒</div>
+    <h2 id="pin-title" style="font-family:Georgia,serif; color:#f0c341; letter-spacing:1px; margin:0 0 6px; font-size:24px;">Shop App</h2>
+    <p id="pin-msg" style="color:#c9c9c9; font-size:14px; margin:0 0 18px; line-height:1.4;">Checking...</p>
+    <input id="pin-input-1" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <input id="pin-input-2" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Repeat PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <button id="pin-go-btn" type="button" style="display:none; width:100%; padding:15px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:17px; cursor:pointer;">Unlock</button>
+    <button id="pin-cancel-btn" type="button" style="display:none; width:100%; margin-top:10px; padding:13px; border:1.5px solid #333; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+    <p id="pin-error" style="color:#e0705a; font-size:14px; font-weight:700; min-height:20px; margin:12px 0 0;"></p>
+    <p id="pin-help" style="display:none; color:#8a8a8a; font-size:12px; margin:14px 0 0; line-height:1.4;">Forgot the PIN? Open the app on a phone that's already unlocked and use 🔒 → Change PIN.</p>
+  </div>
+</div>
+
+<div id="app-topbar" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:#0a2a1a; border-bottom:1.5px solid #25d366; position:relative; font-family:Arial,sans-serif;">
+  <span style="font-size:12px; font-weight:700; color:#7cd992; white-space:nowrap;">☁️ Cloud</span>
+  <span style="display:flex; gap:6px;">
+    <button id="install-btn" type="button" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:7px 12px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap;">📲 Add to Home Screen</button>
+    <button id="pin-menu-btn" type="button" title="Lock / Change PIN" style="background:none; border:1px solid #25d366; color:#7cd992; border-radius:6px; padding:4px 9px; font-size:13px; cursor:pointer;">🔒</button>
+  </span>
+  <div id="pin-menu" style="display:none; position:absolute; right:8px; top:100%; margin-top:4px; z-index:9000; background:#161616; border:1.5px solid #b8912f; border-radius:8px; overflow:hidden; text-align:left;">
+    <button type="button" id="pin-lock-now" style="display:block; width:100%; padding:12px 18px; background:none; border:none; border-bottom:1px solid #333; color:#f0c341; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔒 Lock now</button>
+    <button type="button" id="pin-change" style="display:block; width:100%; padding:12px 18px; background:none; border:none; color:#c9c9c9; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔑 Change PIN</button>
+  </div>
+</div>
+<script>
+// ---- PIN lock ----
+// One PIN for the whole shop, stored (as a scrambled fingerprint, never the
+// PIN itself) in the cloud so it's the same on every phone. Once a phone is
+// unlocked it stays unlocked until you tap 🔒 → Lock now, or the PIN changes.
+// Note: this keeps casual visitors out of the app screen; it is not the same
+// as a full account login.
+(function(){
+  const lockEl = document.getElementById('pin-lock');
+  const titleEl = document.getElementById('pin-title');
+  const msgEl = document.getElementById('pin-msg');
+  const in1 = document.getElementById('pin-input-1');
+  const in2 = document.getElementById('pin-input-2');
+  const goBtn = document.getElementById('pin-go-btn');
+  const errEl = document.getElementById('pin-error');
+  const helpEl = document.getElementById('pin-help');
+  const PIN_KEY = 'app-pin';
+  const LOCAL_KEY = 'shopapp-unlocked-with';
+  const pinStore = makeFirestoreStorage('billing_kv');
+  let mode = 'checking'; // 'set' | 'unlock' | 'change'
+  let cloudPin = null;   // { hash, salt }
+
+  function fingerprint(pin, salt){
+    const s = salt + ':' + pin + ':shop-app';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let r = 0; r < 500; r++){ // repeated so guessing is slow
+      for (let i = 0; i < s.length; i++){
+        const ch = s.charCodeAt(i) + r;
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    }
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+  function localGet(){ try { return localStorage.getItem(LOCAL_KEY); } catch (e) { return null; } }
+  function localSet(v){ try { if (v) localStorage.setItem(LOCAL_KEY, v); else localStorage.removeItem(LOCAL_KEY); } catch (e) {} }
+
+  function showLock(newMode, message){
+    mode = newMode;
+    lockEl.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    titleEl.textContent = newMode === 'set' ? 'Set a PIN' : newMode === 'change' ? 'Change PIN' : 'Shop App';
+    msgEl.textContent = message;
+    errEl.textContent = '';
+    const typing = newMode !== 'checking';
+    in1.style.display = typing ? 'block' : 'none';
+    in2.style.display = (newMode === 'set' || newMode === 'change') ? 'block' : 'none';
+    goBtn.style.display = typing ? 'block' : 'none';
+    goBtn.textContent = newMode === 'unlock' ? 'Unlock' : 'Save PIN';
+    helpEl.style.display = newMode === 'unlock' ? 'block' : 'none';
+    document.getElementById('pin-cancel-btn').style.display = newMode === 'change' ? 'block' : 'none';
+    in1.value = ''; in2.value = '';
+    in1.placeholder = newMode === 'unlock' ? 'PIN' : 'New PIN';
+    if (typing) setTimeout(() => in1.focus(), 50);
+  }
+  function hideLock(){
+    lockEl.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function savePin(pin){
+    const salt = Math.random().toString(36).slice(2, 10);
+    const rec = { hash: fingerprint(pin, salt), salt };
+    await pinStore.set(PIN_KEY, JSON.stringify(rec));
+    cloudPin = rec;
+    localSet(rec.hash);
+  }
+
+  async function submit(){
+    errEl.textContent = '';
+    const p1 = in1.value.trim(), p2 = in2.value.trim();
+    if (!/^\d{4,8}$/.test(p1)){ errEl.textContent = 'PIN must be 4 to 8 digits.'; return; }
+    if (mode === 'unlock'){
+      if (cloudPin && fingerprint(p1, cloudPin.salt) === cloudPin.hash){
+        localSet(cloudPin.hash);
+        hideLock();
+      } else {
+        errEl.textContent = 'Wrong PIN — try again.';
+        in1.value = '';
+      }
+      return;
+    }
+    if (p1 !== p2){ errEl.textContent = 'The two PINs don\'t match.'; return; }
+    goBtn.disabled = true; goBtn.textContent = 'Saving...';
+    try {
+      await savePin(p1);
+      hideLock();
+      if (mode === 'change') alert('PIN changed ✓ — other phones will ask for the new PIN next time.');
+    } catch (e) {
+      errEl.textContent = 'Could not save the PIN — check your internet and try again.';
+    } finally {
+      goBtn.disabled = false; goBtn.textContent = 'Save PIN';
+    }
+  }
+  goBtn.addEventListener('click', submit);
+  document.getElementById('pin-cancel-btn').addEventListener('click', hideLock);
+  [in1, in2].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  async function start(){
+    showLock('checking', 'Checking...');
+    let r;
+    try {
+      r = await pinStore.get(PIN_KEY);
+    } catch (e) {
+      // Offline: a phone that was already unlocked keeps working.
+      if (localGet()) { hideLock(); return; }
+      showLock('checking', 'Can\'t reach the internet to check the PIN. Connect and reopen the app.');
+      return;
+    }
+    if (!r || !r.value){
+      showLock('set', 'Choose a 4–8 digit PIN for your shop app. Everyone using the app will need it once on each phone.');
+      return;
+    }
+    try { cloudPin = JSON.parse(r.value); } catch (e) { cloudPin = null; }
+    if (cloudPin && localGet() === cloudPin.hash){ hideLock(); return; }
+    showLock('unlock', 'Enter your shop PIN.');
+  }
+
+  // 🔒 menu
+  const menuBtn = document.getElementById('pin-menu-btn');
+  const menu = document.getElementById('pin-menu');
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; });
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.getElementById('pin-lock-now').addEventListener('click', () => {
+    localSet(null);
+    showLock('unlock', 'Locked. Enter your shop PIN.');
+  });
+  document.getElementById('pin-change').addEventListener('click', () => {
+    // This phone is already unlocked, so it's trusted to set a new PIN.
+    showLock('change', 'Type a new 4–8 digit PIN twice. All phones will need the new PIN once.');
+  });
+
+  start();
+})();
+</script>
+<script>
+// ---- "Add to Home Screen" ----
+(function(){
+  const btn = document.getElementById('install-btn');
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none'; // already opened from the home-screen icon
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.addEventListener('click', async () => {
+    if (deferred){
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) {}
+      deferred = null;
+      return;
+    }
+    if (location.protocol !== 'https:'){
+      alert('To add this app to your home screen, open it from its web address (your GitHub link) — not from a downloaded or WhatsApp file.');
+      return;
+    }
+    alert('Your phone didn\'t offer the quick install, so add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker not registered:', err));
+  }
+})();
+</script>
+
+<div id="view-catalogue">
+
+
+<header>
+  <span class="medal">🏆</span>
+  <h1>Catalogue Maker</h1>
+  <p id="header-subtitle">Add your trophies below — export as a print-ready PDF, 4 per page</p>
+</header>
+
+<main>
+
+  <div class="add-card" id="catalogue-bar-card">
+    <h2>Your Catalogues</h2>
+    <div class="field">
+      <label>Currently Editing</label>
+      <select id="catalogue-select" style="width:100%; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:18px;"></select>
+    </div>
+    <div style="display:flex; gap:8px;">
+      <button type="button" id="new-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--brass); color:var(--brass-light); padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">+ New</button>
+      <button type="button" id="rename-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#c9c9c9; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">✎ Rename</button>
+      <button type="button" id="delete-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#e0705a; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">🗑 Delete</button>
+    </div>
+    <div id="catalogue-name-row" style="display:none; margin-top:12px; gap:8px;">
+      <input type="text" id="catalogue-name-input" placeholder="Catalogue name" style="flex:1; padding:12px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:17px; margin-bottom:8px; width:100%;">
+      <div style="display:flex; gap:8px;">
+        <button type="button" id="confirm-catalogue-name" style="flex:1; background:var(--brass-light); color:#000; border:none; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:15px; cursor:pointer;">Save</button>
+        <button type="button" id="cancel-catalogue-name" style="flex:1; background:none; border:1.5px solid var(--line); color:#c9c9c9; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+      </div>
+    </div>
+
+    <details style="margin-top:12px; border-top:1px solid var(--line); padding-top:12px;">
+      <summary style="cursor:pointer; font-family:Arial,sans-serif; font-weight:700; font-size:13px; color:#c9c9c9;">⚙️ Backup Settings</summary>
+      <div style="margin-top:12px;">
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="export-data-btn" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); padding:11px; border-radius:6px; font-family:Arial,sans-serif; font-size:13px; font-weight:800; cursor:pointer;">⬇ Export This One</button>
+          <button type="button" id="import-data-btn" style="flex:1; background:none; border:1.5px solid var(--line); color:#c9c9c9; padding:11px; border-radius:6px; font-family:Arial,sans-serif; font-size:13px; font-weight:800; cursor:pointer;">⬆ Import Backup</button>
+          <input type="file" id="import-file-input" accept="application/json" style="display:none;">
+        </div>
+        <button type="button" id="export-all-btn" style="width:100%; margin-top:8px; background:var(--brass-light); border:none; color:#000; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">⬇ Export ALL Catalogues (one file)</button>
+        <p style="font-family:Arial,sans-serif; font-size:12px; color:#8a8a8a; margin:8px 0 0; line-height:1.4;">☁️ Saved in the cloud — the same on every phone. Tap "Export ALL" now and then to keep your own copy.</p>
+      </div>
+    </details>
+  </div>
+
+  <details class="add-card" style="padding:0;">
+    <summary style="padding:18px 20px; cursor:pointer; font-family:Arial,sans-serif; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; font-size:16px; color:var(--brass-light);">🔍 Find Matching Product</summary>
+    <div style="padding:0 20px 20px;">
+      <p style="font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; margin:0 0 14px; line-height:1.4;">Have a photo of a trophy? Upload it to find the closest match in this catalogue.</p>
+      <div class="field">
+        <label>Photo to search</label>
+        <input type="file" id="search-photo-file" accept="image/*" class="native-file-input">
+      </div>
+      <button type="button" id="search-btn" style="width:100%; background:var(--brass-light); color:#000; border:none; padding:14px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:17px; cursor:pointer;">🔍 Search Catalogue</button>
+      <div id="search-status" style="font-family:Arial,sans-serif; font-size:13px; font-weight:600; color:var(--brass-light); text-align:center; margin-top:8px;"></div>
+      <div id="search-results" style="margin-top:14px;"></div>
+    </div>
+  </details>
+
+  <div class="add-card">
+    <h2>Add Item</h2>
+    <div class="field">
+      <label>Photo</label>
+      <div class="photo-input">
+        <button type="button" class="upload-btn" id="choose-photo-btn">Choose Photo</button>
+        <input type="file" id="photo-file" accept="image/*" style="display:none;">
+        <img id="preview-thumb">
+        <span id="file-name" style="font-family:Arial,sans-serif;font-size:14px;font-weight:600;color:var(--brass-light);"></span>
+      </div>
+    </div>
+    <div class="field">
+      <label>Item Name</label>
+      <input type="text" id="item-name" placeholder="e.g. TP-197 Star Trophy">
+    </div>
+
+    <div class="field">
+      <label>Size Variations</label>
+      <div id="variation-rows"></div>
+      <div style="display:flex; gap:8px; margin-top:6px;">
+        <input type="text" id="var-code" placeholder="Size (A)" style="flex:1; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:19px;">
+        <input type="number" id="var-inch" placeholder="Inch (12)" style="flex:1; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:19px;">
+        <input type="number" id="var-price" placeholder="MRP (200)" style="flex:1; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:19px;">
+      </div>
+      <button type="button" id="add-var-btn" style="width:100%; margin-top:8px; background:var(--navy); border:1.5px solid var(--brass); color:var(--brass-light); padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:16px; font-weight:800; cursor:pointer;">+ Add Size / Price</button>
+    </div>
+
+    <div style="display:flex; gap:10px;">
+      <button id="add-btn" style="flex:2;">+ Add to Catalogue</button>
+      <button type="button" id="clear-form-btn" style="flex:1; background:none; border:1.5px solid var(--line); color:#c9c9c9; padding:14px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:15px; cursor:pointer;">Clear</button>
+    </div>
+  </div>
+
+  <div class="list-header">
+    <h2>Catalogue Items</h2>
+    <span id="item-count">0 items</span>
+  </div>
+  <div id="sync-status" style="font-family:Arial,sans-serif; font-size:13px; font-weight:600; color:var(--brass); margin:-6px 0 14px; display:flex; align-items:center; justify-content:space-between;">
+    <span id="sync-text">Loading saved catalogue...</span>
+    <button id="refresh-btn" style="background:none; border:1.5px solid var(--brass); color:var(--brass-light); padding:6px 12px; border-radius:5px; font-family:Arial,sans-serif; font-weight:700; font-size:12px; cursor:pointer;">↻ Refresh</button>
+  </div>
+
+  <input type="text" id="item-search-box" placeholder="🔍 Search products by name or size code..." style="width:100%; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy-2); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:16px; margin-bottom:12px;">
+
+  <label style="display:flex; align-items:center; gap:8px; font-family:Arial,sans-serif; font-size:14px; font-weight:700; color:#e0705a; margin-bottom:12px;">
+    <input type="checkbox" id="show-out-of-stock-only" style="width:18px; height:18px;">
+    Show only Out of Stock items
+  </label>
+
+  <div style="display:flex; gap:8px; margin-bottom:16px;">
+    <button type="button" id="sort-number-btn" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); padding:11px 6px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">🔢 By Number</button>
+    <button type="button" id="sort-size-btn" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); padding:11px 6px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">📏 By Size</button>
+    <button type="button" id="sort-price-btn" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); padding:11px 6px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">💰 By MRP</button>
+  </div>
+
+  <div id="empty-state" class="empty-state">No items yet. Add your first trophy photo above.</div>
+  <div id="grid" class="grid"></div>
+</main>
+
+<div class="footer-bar">
+  <div style="max-width:728px;width:100%;">
+    <div style="display:flex; gap:8px;">
+      <button id="export-btn" disabled style="flex:3;">Export Catalogue as PDF</button>
+      <button id="export-excel-btn" disabled title="Export as Excel" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px;"><span style="font-size:18px;">📊</span><span style="font-size:10px;">Excel</span></button>
+      <button id="export-photos-btn" disabled title="Export all Photos" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px;"><span style="font-size:18px;">📷</span><span style="font-size:10px;">Photos</span></button>
+      <button id="export-oos-btn" title="Export Out of Stock List" style="flex:1; background:none; border:1.5px solid #e0705a; color:#e0705a; border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px;"><span style="font-size:18px;">📋</span><span style="font-size:9px; line-height:1.1;">Out of<br>Stock</span></button>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+
+
+</div>
+
+
+<script>
+// ================= CATALOGUE APP =================
+(function(){
+
+const { jsPDF } = window.jspdf || { jsPDF: function(){ alert('The PDF tool could not load — connect to the internet once and reopen the app.'); throw new Error('PDF tool not loaded'); } };
+
+// ---- Cloud storage layer (Firestore) — see the shared factory up in <head> ----
+const storage = makeLocalStorage('catalogue_kv');
+// Only look for cards/buttons inside THIS screen — the Purchase (vendor)
+// screen uses the same card design, and must never pick up these handlers.
+const __viewRoot = document.getElementById('view-catalogue');
+// --------------------------------------------------------------------------
+
+const CATALOGUE_LIST_KEY = 'catalogue-list';
+const LAST_CATALOGUE_KEY = 'last-catalogue-id';
+
+let catalogues = []; // [{id, name}]
+let currentCatalogueId = null;
+
+// Resolves once loadCatalogueList() has finished at least one full run, so
+// other apps (like Billing's product sync) never read `catalogues` while
+// it's still empty from not having loaded yet — that race previously wiped
+// out the Billing product cache with an empty list.
+let __resolveCatalogueReady;
+window.__catalogueReadyPromise = new Promise(res => { __resolveCatalogueReady = res; });
+
+let items = []; // {id, dataUrl, name, variations:[{code, inch, price}]}
+let pendingPhoto = null;
+let pendingVariations = [];
+let editingId = null;
+
+const syncText = document.getElementById('sync-text');
+const refreshBtn = document.getElementById('refresh-btn');
+const catalogueSelect = document.getElementById('catalogue-select');
+const headerSubtitle = document.getElementById('header-subtitle');
+const newCatalogueBtn = document.getElementById('new-catalogue-btn');
+const renameCatalogueBtn = document.getElementById('rename-catalogue-btn');
+const deleteCatalogueBtn = document.getElementById('delete-catalogue-btn');
+const catalogueNameRow = document.getElementById('catalogue-name-row');
+const catalogueNameInput = document.getElementById('catalogue-name-input');
+
+function indexKey(catId){ return 'index:' + catId; }
+function itemKey(catId, itemId){ return 'item:' + catId + ':' + itemId; }
+
+function makeId(){
+  return 'cat-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+}
+
+// Returns true if the catalogue list was loaded (or a fresh one created)
+// successfully, false if it could not be loaded at all. This distinction
+// matters a lot: a failed read (bad connection, blocked request, etc.) must
+// NEVER be treated the same as "no catalogues exist yet" — doing that once
+// silently created a blank default catalogue and overwrote the real list in
+// the cloud, wiping out every catalogue the shop had. So on any error we
+// leave `catalogues` and the cloud data completely untouched and report
+// failure instead of guessing.
+async function loadCatalogueList(){
+  let r;
+  try {
+    r = await storage.get(CATALOGUE_LIST_KEY);
+  } catch (err) {
+    console.error('Could not load catalogue list — leaving existing data untouched:', err);
+    return false;
+  }
+  catalogues = r && r.value ? JSON.parse(r.value) : [];
+  if (catalogues.length === 0){
+    const defaultCat = { id: makeId(), name: 'My Catalogue' };
+    catalogues = [defaultCat];
+    try {
+      await storage.set(CATALOGUE_LIST_KEY, JSON.stringify(catalogues));
+    } catch (err) {
+      console.error('Could not save the new default catalogue:', err);
+      catalogues = [];
+      return false;
+    }
+  }
+  return true;
+}
+
+async function saveCatalogueList(){
+  await storage.set(CATALOGUE_LIST_KEY, JSON.stringify(catalogues), true);
+}
+
+function renderCatalogueSelect(){
+  catalogueSelect.innerHTML = '';
+  catalogues.forEach(cat => {
+    const opt = document.createElement('option');
+    opt.value = cat.id;
+    opt.textContent = cat.name;
+    if (cat.id === currentCatalogueId) opt.selected = true;
+    catalogueSelect.appendChild(opt);
+  });
+  const current = catalogues.find(c => c.id === currentCatalogueId);
+  headerSubtitle.textContent = current ? ('Editing: ' + current.name) : 'Add your trophies below — export as a print-ready PDF, 4 per page';
+  deleteCatalogueBtn.disabled = catalogues.length <= 1;
+  deleteCatalogueBtn.style.opacity = catalogues.length <= 1 ? '0.4' : '1';
+}
+
+async function switchCatalogue(catId){
+  currentCatalogueId = catId;
+  resetForm();
+  await storage.set(LAST_CATALOGUE_KEY, catId, false).catch(() => null);
+  renderCatalogueSelect();
+  await loadItemsFromStorage(false);
+  attachCatalogueItemsListener(catId);
+}
+
+// ---- Live sync: pick up changes made on another phone automatically ----
+let catalogueListUnsub = null;
+let catalogueItemsUnsub = null;
+
+function attachCatalogueListListener(){
+  if (catalogueListUnsub) catalogueListUnsub();
+  catalogueListUnsub = storage.onChange(CATALOGUE_LIST_KEY, (value) => {
+    const newList = value ? JSON.parse(value) : [];
+    if (JSON.stringify(newList) !== JSON.stringify(catalogues)){
+      catalogues = newList;
+      if (catalogues.length && !catalogues.find(c => c.id === currentCatalogueId)){
+        currentCatalogueId = catalogues[0].id;
+        loadItemsFromStorage(true);
+        attachCatalogueItemsListener(currentCatalogueId);
+      }
+      renderCatalogueSelect();
+    }
+  });
+}
+
+function attachCatalogueItemsListener(catId){
+  if (catalogueItemsUnsub) catalogueItemsUnsub();
+  catalogueItemsUnsub = storage.onChange(indexKey(catId), () => {
+    if (catId === currentCatalogueId) loadItemsFromStorage(true);
+  });
+}
+
+catalogueSelect.addEventListener('change', () => {
+  switchCatalogue(catalogueSelect.value);
+});
+
+newCatalogueBtn.addEventListener('click', () => {
+  catalogueNameRow.style.display = 'block';
+  catalogueNameRow.setAttribute('data-mode', 'new');
+  catalogueNameInput.value = '';
+  catalogueNameInput.focus();
+});
+
+renameCatalogueBtn.addEventListener('click', () => {
+  const current = catalogues.find(c => c.id === currentCatalogueId);
+  catalogueNameRow.style.display = 'block';
+  catalogueNameRow.setAttribute('data-mode', 'rename');
+  catalogueNameInput.value = current ? current.name : '';
+  catalogueNameInput.focus();
+});
+
+document.getElementById('cancel-catalogue-name').addEventListener('click', () => {
+  catalogueNameRow.style.display = 'none';
+});
+
+document.getElementById('confirm-catalogue-name').addEventListener('click', async () => {
+  const name = catalogueNameInput.value.trim();
+  if (!name) { alert('Please enter a catalogue name.'); return; }
+  const mode = catalogueNameRow.getAttribute('data-mode');
+
+  if (mode === 'new'){
+    const newCat = { id: makeId(), name };
+    catalogues.push(newCat);
+    await saveCatalogueList();
+    catalogueNameRow.style.display = 'none';
+    await switchCatalogue(newCat.id);
+  } else {
+    const current = catalogues.find(c => c.id === currentCatalogueId);
+    if (current) current.name = name;
+    await saveCatalogueList();
+    catalogueNameRow.style.display = 'none';
+    renderCatalogueSelect();
+  }
+});
+
+deleteCatalogueBtn.addEventListener('click', async () => {
+  if (catalogues.length <= 1) return;
+  const current = catalogues.find(c => c.id === currentCatalogueId);
+  const ok = confirm('Delete "' + (current ? current.name : 'this catalogue') + '" and all its products? This cannot be undone.');
+  if (!ok) return;
+
+  try {
+    const idx = indexKey(currentCatalogueId);
+    const r = await storage.get(idx, true).catch(() => null);
+    const ids = r && r.value ? JSON.parse(r.value) : [];
+    await Promise.all(ids.map(id => storage.delete(itemKey(currentCatalogueId, id), true).catch(() => null)));
+    await storage.delete(idx, true).catch(() => null);
+  } catch (err) {
+    console.error(err);
+  }
+
+  catalogues = catalogues.filter(c => c.id !== currentCatalogueId);
+  await saveCatalogueList();
+  await switchCatalogue(catalogues[0].id);
+});
+
+const exportDataBtn = document.getElementById('export-data-btn');
+const importDataBtn = document.getElementById('import-data-btn');
+const importFileInput = document.getElementById('import-file-input');
+
+function downloadJsonFile(obj, fileName){
+  const blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+function backupDateStamp(){
+  const d = new Date();
+  return String(d.getDate()).padStart(2, '0') + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + d.getFullYear();
+}
+
+// Reads every product of one catalogue. If any product can't be read, this
+// fails loudly — a backup must never silently miss products.
+async function readCatalogueItems(catId){
+  const idx = await storage.get(indexKey(catId));
+  const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+  const loaded = await Promise.all(ids.map(id => storage.get(itemKey(catId, id)).then(r => (r && r.value ? JSON.parse(r.value) : null))));
+  return loaded.filter(Boolean);
+}
+
+exportDataBtn.addEventListener('click', async () => {
+  try {
+    if (itemsLoadFailed || unloadedIds.length){ alert('This catalogue did not load fully — tap ↻ Refresh first, then export.'); return; }
+    const current = catalogues.find(c => c.id === currentCatalogueId);
+    const name = current ? current.name : 'Catalogue';
+    downloadJsonFile({ type: 'trophy-catalogue-backup', catalogueName: name, items: items }, name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '-backup.json');
+  } catch (err) {
+    console.error(err);
+    alert('Could not create backup file.');
+  }
+});
+
+document.getElementById('export-all-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('export-all-btn');
+  const label = btn.textContent;
+  btn.disabled = true;
+  try {
+    const out = [];
+    let total = 0;
+    for (let i = 0; i < catalogues.length; i++){
+      const cat = catalogues[i];
+      btn.textContent = '⏳ Reading ' + cat.name + ' (' + (i + 1) + ' of ' + catalogues.length + ')...';
+      const catItems = (cat.id === currentCatalogueId && !itemsLoadFailed && !unloadedIds.length) ? items : await readCatalogueItems(cat.id);
+      out.push({ catalogueName: cat.name, items: catItems });
+      total += catItems.length;
+    }
+    downloadJsonFile({ type: 'trophy-catalogue-backup-all', exportedAt: new Date().toISOString(), catalogues: out }, 'all-catalogues-backup-' + backupDateStamp() + '.json');
+    alert('✅ Backup file downloaded: ' + out.length + ' catalogue(s), ' + total + ' product(s).\n\nKeep it safe (e.g. in Google Drive or WhatsApp).');
+  } catch (err) {
+    console.error(err);
+    alert('Could not read every product, so no backup was made (nothing was changed). Tap ↻ Refresh and try again.\n\n' + (err && err.message ? err.message : err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
+
+importDataBtn.addEventListener('click', () => {
+  importFileInput.click();
+});
+
+// Saves one catalogue's products. When replacing an existing catalogue, the
+// new products are written FIRST, then its product list is switched over,
+// and only then are leftover old products removed — so a failure part-way
+// can never leave you with less than you had.
+async function importOneCatalogue(name, srcItems, replaceCat){
+  const prepared = [];
+  const failed = [];
+  for (let i = 0; i < srcItems.length; i++){
+    const it = srcItems[i];
+    try {
+      if (!it || it.id == null) throw new Error('missing id');
+      const copy = { ...it };
+      if (copy.dataUrl) copy.dataUrl = await ensureFirestoreSafeSize(copy.dataUrl);
+      prepared.push(copy);
+    } catch (e) {
+      console.error('Failed to prepare item', it && it.name, e);
+      failed.push((it && it.name) || ('item ' + (i + 1)));
+    }
+  }
+  let cat = replaceCat;
+  let oldIds = [];
+  if (cat){
+    const idx = await storage.get(indexKey(cat.id));
+    oldIds = idx && idx.value ? JSON.parse(idx.value) : [];
+  } else {
+    cat = { id: makeId(), name };
+    catalogues.push(cat);
+    await saveCatalogueList();
+  }
+  await storage.setMany(prepared.map(it => [itemKey(cat.id, it.id), JSON.stringify(it)]));
+  const newIds = prepared.map(it => it.id);
+  await storage.set(indexKey(cat.id), JSON.stringify(newIds), true);
+  const keep = new Set(newIds.map(String));
+  await Promise.all(oldIds.filter(id => !keep.has(String(id))).map(id => storage.delete(itemKey(cat.id, id), true).catch(() => null)));
+  return { cat, count: prepared.length, failed };
+}
+
+async function deleteWholeCatalogue(cat){
+  const idx = await storage.get(indexKey(cat.id)).catch(() => null);
+  const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+  await Promise.all(ids.map(id => storage.delete(itemKey(cat.id, id), true).catch(() => null)));
+  await storage.delete(indexKey(cat.id), true).catch(() => null);
+  catalogues = catalogues.filter(c => c.id !== cat.id);
+  await saveCatalogueList();
+}
+
+importFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  importFileInput.value = '';
+  if (!file) return;
+  let backup;
+  try {
+    backup = JSON.parse(await file.text());
+  } catch (err) {
+    alert('Could not read that backup file — it may be damaged or not a real backup export.');
+    return;
+  }
+  let entries;
+  const isAll = backup && backup.type === 'trophy-catalogue-backup-all' && Array.isArray(backup.catalogues);
+  if (isAll){
+    entries = backup.catalogues.filter(c => c && Array.isArray(c.items)).map(c => ({ name: String(c.catalogueName || 'Catalogue').trim(), items: c.items }));
+  } else if (backup && backup.type === 'trophy-catalogue-backup' && Array.isArray(backup.items)){
+    const suggested = String(backup.catalogueName || 'Imported Catalogue').replace(/\s*\(Imported\)\s*$/i, '').trim();
+    const nm = prompt('Name for this catalogue:', suggested);
+    if (nm === null) return;
+    entries = [{ name: nm.trim() || suggested, items: backup.items }];
+  } else {
+    alert('This does not look like a valid catalogue backup file.');
+    return;
+  }
+  if (!entries.length){ alert('That backup file has no catalogues in it.'); return; }
+
+  const sameName = name => catalogues.find(c => c.name.trim().toLowerCase() === name.toLowerCase());
+  const clashes = entries.filter(en => sameName(en.name));
+  let replace = false;
+  if (clashes.length){
+    replace = confirm((clashes.length === 1 ? '"' + clashes[0].name + '" already exists here.' : clashes.length + ' catalogues in this file already exist here (' + clashes.map(c => c.name).join(', ') + ').') +
+      '\n\nOK = REPLACE them with the products from this file\nCancel = keep both (the file\'s copy is added as "… (Imported)")');
+  }
+  let leftovers = [];
+  if (isAll){
+    const fileNames = new Set(entries.map(en => en.name.toLowerCase()));
+    leftovers = catalogues.filter(c => !fileNames.has(c.name.trim().toLowerCase()));
+  }
+
+  try {
+    let done = 0, totalProducts = 0;
+    const failedAll = [];
+    let firstCat = null;
+    for (const en of entries){
+      done++;
+      syncText.textContent = '⏳ Importing ' + en.name + ' (' + done + ' of ' + entries.length + ')... please keep this open';
+      const existing = sameName(en.name);
+      const res = await importOneCatalogue(existing && !replace ? en.name + ' (Imported)' : en.name, en.items, existing && replace ? existing : null);
+      if (!firstCat) firstCat = res.cat;
+      totalProducts += res.count;
+      failedAll.push(...res.failed);
+    }
+    if (leftovers.length && catalogues.length > leftovers.length &&
+        confirm('These catalogues are here but NOT in the backup file:\n\n' + leftovers.map(c => '• ' + c.name).join('\n') + '\n\nDelete them? (Cancel keeps them)')){
+      for (const c of leftovers) await deleteWholeCatalogue(c);
+    }
+    await switchCatalogue(firstCat ? firstCat.id : catalogues[0].id);
+    alert('✅ Imported ' + entries.length + ' catalogue(s) with ' + totalProducts + ' product(s).' +
+      (failedAll.length ? '\n\n' + failedAll.length + ' product(s) could not be read from the file: ' + failedAll.slice(0, 10).join(', ') : ''));
+  } catch (err) {
+    console.error(err);
+    alert('Import stopped part-way (' + (err && err.message ? err.message : err) + ').\n\nNothing you already had was removed. Check the connection and import the file again.');
+    try { await switchCatalogue(currentCatalogueId || catalogues[0].id); } catch (e) {}
+  }
+});
+
+// Loading a catalogue's products. Three safety rules:
+//  - if its product list can't be read (weak signal), show an error — never
+//    pretend the catalogue is empty (an "empty" list could then be saved over
+//    the real one),
+//  - products that fail to load just now stay in its list (unloadedIds), so
+//    the next save can't drop them,
+//  - if you switch catalogues while one is still loading, the late result is ignored.
+let loadSeq = 0;
+let itemsLoadFailed = false;
+let unloadedIds = [];
+async function loadItemsFromStorage(silent){
+  const seq = ++loadSeq;
+  const catId = currentCatalogueId;
+  try {
+    if (!silent) syncText.textContent = 'Loading saved catalogue...';
+    const indexResult = await storage.get(indexKey(catId));
+    const ids = indexResult && indexResult.value ? JSON.parse(indexResult.value) : [];
+
+    const loaded = await Promise.all(ids.map(async (id) => {
+      try {
+        const r = await storage.get(itemKey(catId, id));
+        return r && r.value ? JSON.parse(r.value) : undefined; // undefined = no longer exists
+      } catch (e) {
+        return null; // null = couldn't be read right now
+      }
+    }));
+    if (seq !== loadSeq || catId !== currentCatalogueId) return;
+
+    items = loaded.filter(Boolean);
+    unloadedIds = ids.filter((id, i) => loaded[i] === null);
+    itemsLoadFailed = false;
+    syncText.style.color = '';
+    syncText.textContent = unloadedIds.length
+      ? ('⚠️ ' + unloadedIds.length + ' product(s) could not be loaded — tap ↻ Refresh')
+      : 'Saved ✓';
+    if (editingId === null){
+      renderGrid();
+    }
+  } catch (err) {
+    console.error(err);
+    if (seq !== loadSeq || catId !== currentCatalogueId) return;
+    items = [];
+    unloadedIds = [];
+    itemsLoadFailed = true;
+    syncText.textContent = '⚠️ Could not load this catalogue — tap ↻ Refresh. Nothing has been deleted.';
+    renderGrid();
+  }
+}
+
+async function saveIndex(){
+  // Never rewrite the product list of a catalogue that didn't load — that would wipe it.
+  if (itemsLoadFailed) throw new Error('This catalogue did not load properly — tap Refresh before making changes.');
+  const ids = items.map(i => i.id);
+  unloadedIds.forEach(id => { if (!ids.some(x => String(x) === String(id))) ids.push(id); });
+  await storage.set(indexKey(currentCatalogueId), JSON.stringify(ids), true);
+}
+
+async function saveItemToStorage(item){
+  if (itemsLoadFailed){
+    syncText.textContent = '⚠️ Not saved — this catalogue did not load properly. Tap ↻ Refresh first.';
+    alert('Not saved — this catalogue did not load properly. Tap ↻ Refresh, then try again.');
+    return;
+  }
+  try {
+    syncText.textContent = 'Saving...';
+    const result = await storage.set(itemKey(currentCatalogueId, item.id), JSON.stringify(item), true);
+    if (!result) throw new Error('save failed');
+    await saveIndex();
+    syncText.textContent = 'Saved ✓';
+  } catch (err) {
+    console.error(err);
+    syncText.textContent = 'Save failed — please try again';
+  }
+}
+
+async function deleteItemFromStorage(id){
+  try {
+    syncText.textContent = 'Saving...';
+    await storage.delete(itemKey(currentCatalogueId, id), true).catch(() => null);
+    await saveIndex();
+    syncText.textContent = 'Saved ✓';
+  } catch (err) {
+    console.error(err);
+    syncText.textContent = 'Save failed — please try again';
+  }
+}
+
+async function saveOrderToStorage(){
+  try {
+    syncText.textContent = 'Saving order...';
+    await saveIndex();
+    syncText.textContent = 'Saved ✓';
+  } catch (err) {
+    console.error(err);
+    syncText.textContent = 'Save failed — please try again';
+  }
+}
+
+// Compresses/resizes a photo before storing so many more products fit
+function compressImage(file, maxDim, quality){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim){
+          height = Math.round(height * (maxDim / width));
+          width = maxDim;
+        } else if (height > maxDim){
+          width = Math.round(width * (maxDim / height));
+          height = maxDim;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = ev.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Firestore caps each document at ~1MB. Older/imported photos may be larger
+// than that (this limit didn't exist with local-only storage), so shrink
+// anything oversized before it's written to the cloud.
+function dataUrlByteSize(dataUrl){
+  const base64 = dataUrl.split(',')[1] || '';
+  return Math.floor(base64.length * 0.75);
+}
+
+function recompressDataUrl(dataUrl, maxDim, quality){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > height && width > maxDim){
+        height = Math.round(height * (maxDim / width));
+        width = maxDim;
+      } else if (height > maxDim){
+        width = Math.round(width * (maxDim / height));
+        height = maxDim;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+async function ensureFirestoreSafeSize(dataUrl){
+  const SAFE_LIMIT = 700000; // leave headroom under Firestore's ~1MB doc cap
+  if (!dataUrl || dataUrlByteSize(dataUrl) <= SAFE_LIMIT) return dataUrl;
+  // Progressively shrink until it fits, or give up after a few tries
+  let current = dataUrl;
+  const attempts = [[900, 0.65], [700, 0.6], [500, 0.55], [400, 0.5]];
+  for (const [dim, q] of attempts){
+    try {
+      current = await recompressDataUrl(dataUrl, dim, q);
+      if (dataUrlByteSize(current) <= SAFE_LIMIT) return current;
+    } catch (e) { /* try next step */ }
+  }
+  return current; // best effort, even if still slightly large
+}
+
+// Perceptual hash (dHash): produces a 64-bit fingerprint of an image's shape/
+// pattern so two similar-looking photos end up with a small "distance"
+// between their hashes, even if lighting/angle/size differ slightly.
+function computeImageHash(dataUrl){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = 9, h = 8;
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      const data = ctx.getImageData(0, 0, w, h).data;
+      const gray = [];
+      for (let i = 0; i < data.length; i += 4){
+        gray.push(0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]);
+      }
+      let hash = '';
+      for (let row = 0; row < h; row++){
+        for (let col = 0; col < w - 1; col++){
+          hash += gray[row * w + col] > gray[row * w + col + 1] ? '1' : '0';
+        }
+      }
+      resolve(hash);
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+function hammingDistance(a, b){
+  let d = 0;
+  for (let i = 0; i < a.length; i++){
+    if (a[i] !== b[i]) d++;
+  }
+  return d;
+}
+
+let pendingSearchPhoto = null;
+const searchPhotoFile = document.getElementById('search-photo-file');
+const searchBtn = document.getElementById('search-btn');
+const searchStatus = document.getElementById('search-status');
+const searchResults = document.getElementById('search-results');
+
+searchPhotoFile.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  searchStatus.textContent = 'Processing photo...';
+  searchResults.innerHTML = '';
+  try {
+    pendingSearchPhoto = await compressImage(file, 500, 0.7);
+    searchStatus.textContent = 'Photo ready — tap Search Catalogue';
+  } catch (err) {
+    console.error(err);
+    searchStatus.textContent = 'Could not read that photo, try again';
+  }
+});
+
+searchBtn.addEventListener('click', async () => {
+  if (!pendingSearchPhoto) { alert('Please choose a photo to search with first.'); return; }
+  if (items.length === 0) { alert('This catalogue has no products yet.'); return; }
+
+  searchStatus.textContent = 'Searching...';
+  searchResults.innerHTML = '';
+
+  try {
+    const queryHash = await computeImageHash(pendingSearchPhoto);
+
+    const scored = await Promise.all(items.map(async (item) => {
+      let hash = item.hash;
+      if (!hash){
+        hash = await computeImageHash(item.dataUrl);
+        item.hash = hash; // cache in memory; also persisted lazily below
+        saveItemToStorage(item);
+      }
+      const distance = hammingDistance(queryHash, hash);
+      const similarity = Math.round((1 - distance / queryHash.length) * 100);
+      return { item, similarity };
+    }));
+
+    scored.sort((a, b) => b.similarity - a.similarity);
+    const top = scored.slice(0, 5);
+
+    searchStatus.textContent = 'Best matches:';
+    searchResults.innerHTML = top.map(({ item, similarity }) => {
+      const sizeText = item.variations.map(v =>
+        [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join('-')
+      ).join(', ');
+      return `
+        <div style="display:flex; gap:12px; align-items:center; background:var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px;">
+          <img src="${item.dataUrl}" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;">
+          <div style="flex:1; font-family:Arial,sans-serif;">
+            <p style="margin:0 0 2px; font-size:16px; font-weight:800; color:var(--cream);">${escapeHtml(item.name)}</p>
+            ${sizeText ? `<p style="margin:0; font-size:13px; font-weight:700; color:#c9c9c9;">${escapeHtml(sizeText)}</p>` : ''}
+          </div>
+          <div style="text-align:right; flex-shrink:0;">
+            <p style="margin:0; font-size:16px; font-weight:800; color:var(--brass-light);">${similarity}%</p>
+            <p style="margin:0; font-size:11px; color:#8a8a8a;">match</p>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    console.error(err);
+    searchStatus.textContent = 'Search failed, please try again';
+  }
+});
+
+refreshBtn.addEventListener('click', () => loadItemsFromStorage(false));
+
+const fileInput = document.getElementById('photo-file');
+const choosePhotoBtn = document.getElementById('choose-photo-btn');
+const previewThumb = document.getElementById('preview-thumb');
+const fileNameEl = document.getElementById('file-name');
+const nameInput = document.getElementById('item-name');
+const varCodeInput = document.getElementById('var-code');
+const varInchInput = document.getElementById('var-inch');
+const varPriceInput = document.getElementById('var-price');
+const addVarBtn = document.getElementById('add-var-btn');
+const variationRows = document.getElementById('variation-rows');
+const addBtn = document.getElementById('add-btn');
+const grid = document.getElementById('grid');
+const emptyState = document.getElementById('empty-state');
+
+
+async function recoverMissingProducts(btn){
+  if (itemsLoadFailed){ alert('This catalogue did not load properly — tap ↻ Refresh first, then try again.'); return; }
+  const catId = currentCatalogueId;
+  const current = catalogues.find(c => c.id === catId);
+  const curName = current ? current.name : 'this catalogue';
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '🛟 Searching...';
+  try {
+    // 1) Products saved under this catalogue that dropped out of its product list.
+    const found = await storage.listByPrefix('item:' + catId + ':');
+    const known = new Set(items.map(i => String(i.id)).concat(unloadedIds.map(String)));
+    const extra = [];
+    found.forEach(r => {
+      try { const it = JSON.parse(r.value); if (it && it.id != null && !known.has(String(it.id))) extra.push(it); } catch (e) {}
+    });
+    if (catId !== currentCatalogueId) return;
+    if (extra.length){
+      extra.sort((x, y) => (x.id > y.id ? 1 : x.id < y.id ? -1 : 0));
+      items = items.concat(extra);
+      await saveIndex();
+      renderGrid();
+      alert('✅ Recovered ' + extra.length + ' product(s) into "' + curName + '".');
+      return;
+    }
+
+    // 2) Whole product lists that lost their place in your catalogue list.
+    const listed = new Set(catalogues.map(c => String(c.id)));
+    const idxDocs = await storage.listByPrefix('index:');
+    const orphans = [];
+    idxDocs.forEach(r => {
+      const oid = r.key.slice('index:'.length);
+      if (listed.has(oid)) return;
+      let ids = [];
+      try { ids = JSON.parse(r.value) || []; } catch (e) {}
+      if (ids.length) orphans.push({ id: oid, ids });
+    });
+    if (!orphans.length){
+      alert('No missing products were found on this phone for "' + curName + '".\n\nIf you have a backup file of it, use ⚙️ Backup → ⬆ Import Backup to bring it back.');
+      return;
+    }
+    for (const o of orphans){
+      const sample = (await Promise.all(o.ids.slice(0, 4).map(id => storage.get(itemKey(o.id, id)).catch(() => null))))
+        .map(r => { try { return JSON.parse(r.value).name; } catch (e) { return null; } }).filter(Boolean);
+      const what = 'Found ' + o.ids.length + ' saved product(s) that are not in any of your catalogues' + (sample.length ? '\n(e.g. ' + sample.join(', ') + ')' : '') + '.';
+      if (items.length === 0){
+        if (!confirm(what + '\n\nRestore them into "' + curName + '"?\n\nOK = restore here · Cancel = show the next group')) continue;
+        if (catId !== currentCatalogueId) return;
+        current.id = o.id; // point this catalogue at the found products
+        await saveCatalogueList();
+        await switchCatalogue(o.id);
+      } else {
+        if (!confirm(what + '\n\nRestore them as a separate catalogue?\n\nOK = restore · Cancel = show the next group')) continue;
+        const nm = prompt('Name for the restored catalogue:', 'Recovered ({n} products)'.replace('{n}', o.ids.length));
+        if (nm === null) continue;
+        catalogues.push({ id: o.id, name: nm.trim() || 'Recovered' });
+        await saveCatalogueList();
+        await switchCatalogue(o.id);
+      }
+      alert('✅ Restored ' + o.ids.length + ' product(s).');
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    alert('Could not search right now (' + (err && err.message ? err.message : err) + ').\n\nTry again, or re-import a backup file.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+const itemCount = document.getElementById('item-count');
+const itemSearchBox = document.getElementById('item-search-box');
+itemSearchBox.addEventListener('input', () => renderGrid());
+const showOutOfStockOnly = document.getElementById('show-out-of-stock-only');
+showOutOfStockOnly.addEventListener('change', () => renderGrid());
+
+// Force product name & size code to always be uppercase as you type
+function forceUppercase(input){
+  input.addEventListener('input', () => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    input.value = input.value.toUpperCase();
+    input.setSelectionRange(start, end);
+  });
+}
+forceUppercase(nameInput);
+forceUppercase(varCodeInput);
+const exportBtn = document.getElementById('export-btn');
+const exportExcelBtn = document.getElementById('export-excel-btn');
+const exportPhotosBtn = document.getElementById('export-photos-btn');
+const statusEl = document.getElementById('status');
+
+let editingVarIndex = null;
+
+function renderVariationRows(){
+  variationRows.innerHTML = '';
+  pendingVariations.forEach((v, idx) => {
+    const row = document.createElement('div');
+    row.className = 'var-chip';
+    const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join(' — ');
+    row.innerHTML = `
+      <span>${escapeHtml(label)}</span>
+      <span style="display:flex; gap:10px;">
+        <button type="button" class="var-edit" data-idx="${idx}" style="background:none; border:none; color:var(--brass-light); cursor:pointer; font-size:14px; font-weight:800;">Edit</button>
+        <button type="button" class="var-remove" data-idx="${idx}">Remove</button>
+      </span>
+    `;
+    variationRows.appendChild(row);
+  });
+  __viewRoot.querySelectorAll('.var-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-idx'));
+      const v = pendingVariations[idx];
+      if (!v) return;
+      varCodeInput.value = v.code || '';
+      varInchInput.value = v.inch || '';
+      varPriceInput.value = v.price || '';
+      editingVarIndex = idx;
+      addVarBtn.textContent = '✓ Update Size / Price';
+      varCodeInput.focus();
+    });
+  });
+  __viewRoot.querySelectorAll('.var-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-idx'));
+      pendingVariations.splice(idx, 1);
+      if (editingVarIndex === idx){
+        editingVarIndex = null;
+        varCodeInput.value = '';
+        varInchInput.value = '';
+        varPriceInput.value = '';
+        addVarBtn.textContent = '+ Add Size / Price';
+      }
+      renderVariationRows();
+    });
+  });
+}
+
+addVarBtn.addEventListener('click', () => {
+  const code = varCodeInput.value.trim();
+  const inch = varInchInput.value.trim();
+  const price = varPriceInput.value.trim();
+  if (!code && !inch && !price) return;
+
+  if (editingVarIndex !== null){
+    pendingVariations[editingVarIndex] = { code, inch, price };
+    editingVarIndex = null;
+    addVarBtn.textContent = '+ Add Size / Price';
+  } else {
+    pendingVariations.push({ code, inch, price });
+  }
+
+  varCodeInput.value = '';
+  varInchInput.value = '';
+  varPriceInput.value = '';
+  renderVariationRows();
+});
+
+choosePhotoBtn.addEventListener('click', () => {
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  fileNameEl.textContent = 'Compressing photo...';
+  try {
+    const compressed = await compressImage(file, 1000, 0.72);
+    pendingPhoto = await ensureFirestoreSafeSize(compressed);
+    previewThumb.src = pendingPhoto;
+    previewThumb.style.display = 'block';
+    fileNameEl.textContent = file.name.length > 18 ? file.name.slice(0,15) + '...' : file.name;
+  } catch (err) {
+    console.error(err);
+    fileNameEl.textContent = 'Could not read photo, try again';
+  }
+});
+
+function resetForm(){
+  editingId = null;
+  editingVarIndex = null;
+  pendingPhoto = null;
+  pendingVariations = [];
+  fileInput.value = '';
+  previewThumb.style.display = 'none';
+  fileNameEl.textContent = '';
+  nameInput.value = '';
+  varCodeInput.value = '';
+  varInchInput.value = '';
+  varPriceInput.value = '';
+  addVarBtn.textContent = '+ Add Size / Price';
+  renderVariationRows();
+  addBtn.textContent = '+ Add to Catalogue';
+}
+
+document.getElementById('clear-form-btn').addEventListener('click', resetForm);
+
+addBtn.addEventListener('click', () => {
+  const name = nameInput.value.trim();
+  if (!pendingPhoto) { alert('Please choose a photo first.'); return; }
+  if (!name) { alert('Please enter an item name.'); return; }
+
+  // Duplicate model number / product name check (case-insensitive), skipping
+  // the item currently being edited so re-saving it doesn't flag itself.
+  const duplicate = items.find(i =>
+    i.name.trim().toUpperCase() === name.toUpperCase() && i.id !== editingId
+  );
+  if (duplicate){
+    alert('Model number "' + name + '" already exists in this catalogue. Please use a different name/number.');
+    return;
+  }
+
+  // If the user typed a size/price row but forgot to tap "+ Add Size / Price"
+  // before saving, commit it automatically so it isn't silently dropped.
+  const leftoverCode = varCodeInput.value.trim();
+  const leftoverInch = varInchInput.value.trim();
+  const leftoverPrice = varPriceInput.value.trim();
+  if (leftoverCode || leftoverInch || leftoverPrice){
+    if (editingVarIndex !== null){
+      pendingVariations[editingVarIndex] = { code: leftoverCode, inch: leftoverInch, price: leftoverPrice };
+    } else {
+      pendingVariations.push({ code: leftoverCode, inch: leftoverInch, price: leftoverPrice });
+    }
+  }
+
+  let savedItem;
+
+  if (editingId !== null){
+    const idx = items.findIndex(i => i.id === editingId);
+    savedItem = {
+      id: editingId,
+      dataUrl: pendingPhoto,
+      name: name,
+      variations: pendingVariations.slice()
+    };
+    if (idx !== -1){
+      items[idx] = savedItem;
+    }
+  } else {
+    savedItem = {
+      id: Date.now(),
+      dataUrl: pendingPhoto,
+      name: name,
+      variations: pendingVariations.slice()
+    };
+    items.push(savedItem);
+  }
+
+  resetForm();
+  renderGrid();
+  saveItemToStorage(savedItem);
+});
+
+function startEdit(id){
+  const item = items.find(i => i.id === id);
+  if (!item) return;
+  editingId = id;
+  pendingPhoto = item.dataUrl;
+  pendingVariations = item.variations.slice();
+  nameInput.value = item.name;
+  previewThumb.src = item.dataUrl;
+  previewThumb.style.display = 'block';
+  fileNameEl.textContent = 'Current photo';
+  renderVariationRows();
+  addBtn.textContent = '✓ Update Item';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function attachDragHandlers(){
+  let dragCard = null;
+  let dragEngaged = false;
+  let pressTimer = null;
+  let startX = 0, startY = 0;
+
+  __viewRoot.querySelectorAll('.drag-handle').forEach(handle => {
+    handle.addEventListener('pointerdown', (e) => {
+      dragCard = handle.closest('.item-card');
+      dragEngaged = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(() => {
+        if (!dragCard) return;
+        dragEngaged = true;
+        dragCard.classList.add('dragging');
+        handle.style.touchAction = 'none';
+        try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+      }, 250);
+    });
+
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragCard) return;
+
+      if (!dragEngaged){
+        // If the finger moves before the hold timer fires, treat it as a
+        // normal scroll/tap instead of a drag — don't hijack the gesture.
+        const dx = Math.abs(e.clientX - startX);
+        const dy = Math.abs(e.clientY - startY);
+        if (dx > 10 || dy > 10){
+          clearTimeout(pressTimer);
+          dragCard = null;
+        }
+        return;
+      }
+
+      e.preventDefault();
+      const overEl = document.elementFromPoint(e.clientX, e.clientY);
+      const overCard = overEl && overEl.closest('.item-card');
+      if (overCard && overCard !== dragCard && overCard.parentElement === grid){
+        const cards = Array.from(grid.children);
+        const dragIdx = cards.indexOf(dragCard);
+        const overIdx = cards.indexOf(overCard);
+        if (dragIdx < overIdx){
+          grid.insertBefore(dragCard, overCard.nextSibling);
+        } else {
+          grid.insertBefore(dragCard, overCard);
+        }
+      }
+    });
+
+    const finishDrag = (e) => {
+      clearTimeout(pressTimer);
+      handle.style.touchAction = '';
+      if (!dragCard){ return; }
+      if (!dragEngaged){
+        dragCard = null;
+        return;
+      }
+      dragCard.classList.remove('dragging');
+      try { handle.releasePointerCapture(e.pointerId); } catch(err) {}
+      const newOrderIds = Array.from(grid.children).map(c => Number(c.getAttribute('data-item-id')));
+      items.sort((a, b) => newOrderIds.indexOf(a.id) - newOrderIds.indexOf(b.id));
+      dragCard = null;
+      dragEngaged = false;
+      renderGrid();
+      saveOrderToStorage();
+    };
+
+    handle.addEventListener('pointerup', finishDrag);
+    handle.addEventListener('pointercancel', finishDrag);
+  });
+}
+
+function movePosition(id, newPos){
+  const idx = items.findIndex(i => i.id === id);
+  if (idx === -1) return;
+  let target = Math.max(1, Math.min(items.length, newPos)) - 1;
+  if (target === idx){ renderGrid(); return; }
+  const [moved] = items.splice(idx, 1);
+  items.splice(target, 0, moved);
+  renderGrid();
+  saveOrderToStorage();
+}
+
+// Pulls the first number out of a product name (e.g. "TA-1239 (BOWLER)" -> 1239)
+// so products sort by their model number, not alphabetically.
+function extractModelNumber(name){
+  const match = name.match(/(\d+(\.\d+)?)/);
+  return match ? parseFloat(match[1]) : Infinity;
+}
+
+document.getElementById('sort-number-btn').addEventListener('click', () => {
+  if (items.length === 0) return;
+  const ok = confirm('Sort all ' + items.length + ' products in this catalogue by model number, lowest to highest? This will change their current order.');
+  if (!ok) return;
+
+  // Stable sort: products sharing the same number (e.g. TP-6024 and
+  // TP-6024 (P)) stay grouped together in their existing relative order.
+  items = items
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => {
+      const diff = extractModelNumber(a.item.name) - extractModelNumber(b.item.name);
+      return diff !== 0 ? diff : a.originalIndex - b.originalIndex;
+    })
+    .map(entry => entry.item);
+
+  renderGrid();
+  saveOrderToStorage();
+  statusEl.textContent = 'Sorted ' + items.length + ' products by number.';
+});
+
+// A product can have multiple sizes (A/B/C variations) — use the smallest
+// inch value and lowest price among its own variations as the sort key.
+function extractMinInch(item){
+  const inches = (item.variations || [])
+    .map(v => parseFloat(v.inch))
+    .filter(n => !isNaN(n));
+  return inches.length ? Math.min(...inches) : Infinity;
+}
+
+function extractMinPrice(item){
+  const prices = (item.variations || [])
+    .map(v => parseFloat(v.price))
+    .filter(n => !isNaN(n));
+  return prices.length ? Math.min(...prices) : Infinity;
+}
+
+function sortItemsBy(keyFn, label){
+  if (items.length === 0) return;
+  const ok = confirm('Sort all ' + items.length + ' products in this catalogue by ' + label + ', lowest to highest? This will change their current order.');
+  if (!ok) return;
+
+  items = items
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => {
+      const diff = keyFn(a.item) - keyFn(b.item);
+      return diff !== 0 ? diff : a.originalIndex - b.originalIndex;
+    })
+    .map(entry => entry.item);
+
+  renderGrid();
+  saveOrderToStorage();
+  statusEl.textContent = 'Sorted ' + items.length + ' products by ' + label + '.';
+}
+
+document.getElementById('sort-size-btn').addEventListener('click', () => {
+  sortItemsBy(extractMinInch, 'size (inch)');
+});
+
+document.getElementById('sort-price-btn').addEventListener('click', () => {
+  sortItemsBy(extractMinPrice, 'MRP');
+});
+
+// ---- Edit a product right on its card (no jumping to the top) ----
+// The card turns into a small form: photo, name, and every size with its
+// price. Save keeps the product's Out of Stock marks and its place in the list.
+let inlineEditId = null;
+let inlineDraft = null;
+
+function startInlineEdit(id){
+  const item = items.find(i => i.id === id);
+  if (!item) return;
+  inlineEditId = id;
+  inlineDraft = {
+    name: item.name || '',
+    dataUrl: item.dataUrl,
+    variations: (item.variations || []).map(v => ({ ...v }))
+  };
+  if (!inlineDraft.variations.length) inlineDraft.variations.push({ code: '', inch: '', price: '' });
+  renderGrid();
+  const card = grid.querySelector('.item-card[data-item-id="' + id + '"]');
+  if (card) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function closeInlineEdit(){
+  inlineEditId = null;
+  inlineDraft = null;
+  renderGrid();
+}
+
+function buildInlineEditor(item){
+  const d = inlineDraft;
+  const inputCss = 'width:100%; min-width:0; box-sizing:border-box; padding:8px 6px; border-radius:5px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:14px;';
+  const labelCss = 'display:block; font-family:Arial,sans-serif; font-size:11px; font-weight:800; color:var(--brass-light); text-transform:uppercase; letter-spacing:0.5px; margin:8px 0 4px;';
+  const card = document.createElement('div');
+  card.className = 'item-card';
+  card.setAttribute('data-item-id', item.id);
+  card.style.borderColor = 'var(--brass-light)';
+  card.style.gridColumn = '1 / -1'; // full width while editing, so sizes and prices fit
+  card.innerHTML = `
+    <div style="background:var(--brass-light); color:#000; text-align:center; padding:7px 4px; font-family:Arial,sans-serif; font-weight:800; font-size:12px;">✎ Editing</div>
+    <div style="position:relative;">
+      <img class="ie-img" src="">
+      <button type="button" class="ie-photo-btn" style="position:absolute; bottom:6px; right:6px; background:rgba(0,0,0,0.75); border:1.5px solid var(--brass-light); color:var(--brass-light); border-radius:5px; padding:5px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:12px; cursor:pointer;">📷 Change</button>
+      <input type="file" class="ie-photo-file" accept="image/*" style="display:none;">
+    </div>
+    <div class="item-body">
+      <label style="${labelCss} margin-top:0;">Name / Model No.</label>
+      <input type="text" class="ie-name" style="${inputCss}">
+      <label style="${labelCss}">Size · Inch · MRP</label>
+      <div class="ie-rows"></div>
+      <button type="button" class="ie-add" style="width:100%; margin-top:4px; background:none; border:1.5px dashed var(--brass); color:var(--brass-light); padding:8px; border-radius:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">+ Add size</button>
+    </div>
+    <div class="card-actions">
+      <div class="row">
+        <button type="button" class="ie-save" style="font-size:15px; color:#7cd992; border-right:1.5px solid var(--line);">✓ Save</button>
+        <button type="button" class="ie-cancel" style="font-size:15px; color:#c9c9c9;">Cancel</button>
+      </div>
+    </div>
+  `;
+  card.querySelector('.ie-img').src = d.dataUrl;
+  const nameIn = card.querySelector('.ie-name');
+  nameIn.value = d.name;
+  nameIn.addEventListener('input', () => { d.name = nameIn.value; });
+
+  const rowsBox = card.querySelector('.ie-rows');
+  d.variations.forEach((v, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:4px; align-items:center; margin-bottom:6px;';
+    row.innerHTML = `
+      <input type="text" class="ie-code" placeholder="Size" style="${inputCss} flex:1.1;">
+      <input type="number" class="ie-inch" placeholder="Inch" inputmode="decimal" style="${inputCss} flex:1;">
+      <input type="number" class="ie-price" placeholder="MRP" inputmode="decimal" style="${inputCss} flex:1.2;">
+      <button type="button" class="ie-del" title="Remove this size" style="flex-shrink:0; background:none; border:none; color:#e0705a; font-size:17px; font-weight:800; cursor:pointer; padding:0 2px;">✕</button>
+    `;
+    [['.ie-code', 'code'], ['.ie-inch', 'inch'], ['.ie-price', 'price']].forEach(([sel, field]) => {
+      const inp = row.querySelector(sel);
+      inp.value = v[field] == null ? '' : v[field];
+      inp.addEventListener('input', () => { d.variations[i][field] = inp.value; });
+    });
+    row.querySelector('.ie-del').addEventListener('click', () => {
+      d.variations.splice(i, 1);
+      renderGrid();
+    });
+    rowsBox.appendChild(row);
+  });
+
+  card.querySelector('.ie-add').addEventListener('click', () => {
+    d.variations.push({ code: '', inch: '', price: '' });
+    renderGrid();
+    const rows = grid.querySelectorAll('.item-card[data-item-id="' + item.id + '"] .ie-code');
+    if (rows.length) rows[rows.length - 1].focus();
+  });
+
+  const photoFile = card.querySelector('.ie-photo-file');
+  card.querySelector('.ie-photo-btn').addEventListener('click', () => photoFile.click());
+  photoFile.addEventListener('change', async () => {
+    const file = photoFile.files[0];
+    if (!file) return;
+    try {
+      d.dataUrl = await compressImage(file, 1000, 0.72);
+      renderGrid();
+    } catch (e) {
+      console.error(e);
+      alert('Could not read that photo. Please try another one.');
+    }
+  });
+
+  card.querySelector('.ie-cancel').addEventListener('click', closeInlineEdit);
+  card.querySelector('.ie-save').addEventListener('click', () => {
+    const name = (d.name || '').trim();
+    if (!name){ alert('Please enter a name / model number.'); nameIn.focus(); return; }
+    const duplicate = items.find(i => i.id !== item.id && (i.name || '').trim().toUpperCase() === name.toUpperCase());
+    if (duplicate){ alert('Model number "' + name + '" already exists here. Please use a different name/number.'); return; }
+    const variations = d.variations
+      .map(v => ({ ...v, code: String(v.code == null ? '' : v.code).trim(), inch: String(v.inch == null ? '' : v.inch).trim(), price: String(v.price == null ? '' : v.price).trim() }))
+      .filter(v => v.code || v.inch || v.price);
+    const idx = items.findIndex(i => i.id === item.id);
+    if (idx === -1){ closeInlineEdit(); return; }
+    const updated = { ...items[idx], name, dataUrl: d.dataUrl, variations };
+    if (d.dataUrl !== items[idx].dataUrl) delete updated.hash; // photo changed — matching fingerprint is rebuilt when needed
+    items[idx] = updated;
+    inlineEditId = null;
+    inlineDraft = null;
+    renderGrid();
+    saveItemToStorage(updated);
+  });
+  return card;
+}
+
+function renderGrid(){
+  grid.innerHTML = '';
+  if (items.length === 0){
+    emptyState.style.display = itemsLoadFailed ? 'none' : 'block';
+    exportBtn.disabled = true;
+    exportExcelBtn.disabled = true;
+    exportPhotosBtn.disabled = true;
+  } else {
+    emptyState.style.display = 'none';
+    exportBtn.disabled = false;
+    exportExcelBtn.disabled = false;
+    exportPhotosBtn.disabled = false;
+  }
+
+  const query = itemSearchBox.value.trim().toLowerCase();
+  const isSearching = query.length > 0;
+  const stockOnly = showOutOfStockOnly.checked;
+  let displayItems = isSearching
+    ? items.filter(item => {
+        const nameMatch = item.name.toLowerCase().includes(query);
+        const sizeMatch = item.variations.some(v => (v.code || '').toLowerCase().includes(query));
+        return nameMatch || sizeMatch;
+      })
+    : items;
+  if (stockOnly){
+    displayItems = displayItems.filter(item => item.outOfStock);
+  }
+  const isFiltering = isSearching || stockOnly;
+
+  itemCount.textContent = isFiltering
+    ? (displayItems.length + ' of ' + items.length + ' items')
+    : (items.length + (items.length === 1 ? ' item' : ' items'));
+
+  displayItems.forEach((item) => {
+    const index = items.findIndex(i => i.id === item.id);
+    if (item.id === inlineEditId && inlineDraft){ grid.appendChild(buildInlineEditor(item)); return; }
+    const sizeRowsHtml = (item.variations || []).map((v, vIdx) => {
+      const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join('-');
+      if (!label) return '';
+      return `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+          <span style="flex:1; min-width:0; font-size:13px; font-weight:700; line-height:1.35; color:${v.outOfStock ? '#8a8a8a' : 'var(--brass-light)'}; ${v.outOfStock ? 'text-decoration:line-through;' : ''}">${escapeHtml(label)}</span>
+          <button type="button" class="size-stock-toggle" data-id="${item.id}" data-var-idx="${vIdx}" style="flex-shrink:0; background:none; border:1.5px solid ${v.outOfStock ? '#7cd992' : '#e0705a'}; color:${v.outOfStock ? '#7cd992' : '#e0705a'}; border-radius:5px; padding:4px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:11px; cursor:pointer; white-space:nowrap;">${v.outOfStock ? '✅ Restock' : '🚫 Out'}</button>
+        </div>`;
+    }).join('');
+
+    const card = document.createElement('div');
+    card.className = 'item-card';
+    card.setAttribute('data-item-id', item.id);
+    card.innerHTML = `
+      ${isFiltering ? '' : `<div class="drag-handle" data-id="${item.id}">⠿ Hold &amp; drag to reorder</div>`}
+      <div style="position:relative;">
+        <img src="${item.dataUrl}" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
+        ${item.outOfStock ? `<div style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; pointer-events:none;"><span style="background:rgba(179,70,44,0.92); color:#fff; font-family:Arial,sans-serif; font-weight:800; font-size:13px; padding:5px 12px; border-radius:5px; transform:rotate(-12deg); letter-spacing:0.5px;">OUT OF STOCK</span></div>` : ''}
+        <button type="button" class="download-photo-btn" data-id="${item.id}" title="Download this photo" style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.7); border:1.5px solid var(--brass-light); color:var(--brass-light); border-radius:5px; padding:5px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">⬇</button>
+      </div>
+      <div class="item-body">
+        <p class="name">${escapeHtml(item.name)}</p>
+        ${sizeRowsHtml}
+      </div>
+      <div style="display:flex; align-items:center; gap:6px; padding:8px 10px; border-top:1.5px solid var(--line); background:var(--navy);">
+        <label style="font-family:Arial,sans-serif; font-size:12px; font-weight:700; color:#c9c9c9; white-space:nowrap;">Position:</label>
+        <input type="number" class="position-input" data-id="${item.id}" min="1" max="${items.length}" value="${index + 1}" style="width:100%; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:7px; font-family:Arial,sans-serif; font-weight:800; font-size:14px;">
+      </div>
+      <div class="card-actions">
+        ${isFiltering ? '' : `
+        <div class="row">
+          <button class="move-btn" data-id="${item.id}" data-dir="up" ${index === 0 ? 'disabled' : ''}>↑ Move Up</button>
+          <button class="move-btn" data-id="${item.id}" data-dir="down" ${index === items.length - 1 ? 'disabled' : ''}>↓ Move Down</button>
+        </div>`}
+        <div class="row">
+          <button class="edit-btn" data-id="${item.id}" style="font-size:15px;">Edit</button>
+          <button class="remove-btn" data-id="${item.id}" style="font-size:15px;">Remove</button>
+        </div>
+        <div class="row">
+          <button class="stock-toggle-btn" data-id="${item.id}" style="font-size:13px; color:${item.outOfStock ? '#7cd992' : '#e0705a'};">${item.outOfStock ? '✅ Restock' : '🚫 Out of Stock'}</button>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+
+  __viewRoot.querySelectorAll('.position-input').forEach(inp => {
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') inp.blur();
+    });
+    inp.addEventListener('change', () => {
+      const id = Number(inp.getAttribute('data-id'));
+      const newPos = parseInt(inp.value, 10);
+      if (!newPos || isNaN(newPos)) { renderGrid(); return; }
+      movePosition(id, newPos);
+    });
+  });
+
+  __viewRoot.querySelectorAll('.download-photo-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const item = items.find(i => i.id === id);
+      if (!item) return;
+      const safeName = item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'photo';
+      const a = document.createElement('a');
+      a.href = item.dataUrl;
+      a.download = safeName + '.jpg';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    });
+  });
+
+  __viewRoot.querySelectorAll('.stock-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const item = items.find(i => i.id === id);
+      if (!item) return;
+      item.outOfStock = !item.outOfStock;
+      renderGrid();
+      saveItemToStorage(item);
+    });
+  });
+
+  __viewRoot.querySelectorAll('.size-stock-toggle').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = Number(btn.getAttribute('data-id'));
+      const varIdx = Number(btn.getAttribute('data-var-idx'));
+      const item = items.find(i => i.id === id);
+      if (!item || !item.variations || !item.variations[varIdx]) return;
+      item.variations[varIdx].outOfStock = !item.variations[varIdx].outOfStock;
+      renderGrid();
+      saveItemToStorage(item);
+    });
+  });
+
+  if (isFiltering && displayItems.length === 0){
+    grid.innerHTML = '<p style="grid-column:1/-1; text-align:center; color:#8a8a8a; font-family:Arial,sans-serif; padding:20px;">No products match.</p>';
+  }
+
+  if (!isFiltering){
+    attachDragHandlers();
+  }
+
+  __viewRoot.querySelectorAll('.move-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const dir = btn.getAttribute('data-dir');
+      const idx = items.findIndex(i => i.id === id);
+      if (idx === -1) return;
+      const swapWith = dir === 'up' ? idx - 1 : idx + 1;
+      if (swapWith < 0 || swapWith >= items.length) return;
+      [items[idx], items[swapWith]] = [items[swapWith], items[idx]];
+      renderGrid();
+      saveOrderToStorage();
+    });
+  });
+
+  __viewRoot.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      startInlineEdit(Number(btn.getAttribute('data-id')));
+    });
+  });
+
+  __viewRoot.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      items = items.filter(i => i.id !== id);
+      if (inlineEditId === id){ inlineEditId = null; inlineDraft = null; }
+      if (editingId === id){
+        resetForm();
+      }
+      renderGrid();
+      deleteItemFromStorage(id);
+    });
+  });
+}
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+exportBtn.addEventListener('click', async () => {
+  const hasAnyStock = items.some(item => {
+    if (item.outOfStock) return false;
+    if (item.variations && item.variations.length > 0){
+      return item.variations.some(v => !v.outOfStock);
+    }
+    return true;
+  });
+  if (!hasAnyStock){
+    alert('Every product (and every size) in this catalogue is currently marked Out of Stock, so there\'s nothing to export. Restock at least one item first.');
+    return;
+  }
+  exportBtn.disabled = true;
+  statusEl.textContent = 'Generating PDF...';
+
+  try {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageWidth = 210;
+    const pageHeight = 297;
+    const margin = 12;
+    const gap = 8;
+    const cols = 2, rows = 2;
+    const cellW = (pageWidth - margin*2 - gap) / cols;
+    const cellH = (pageHeight - margin*2 - gap - 14) / rows; // leave room for title
+    const imgH = cellH * 0.55;
+    const textH = cellH - imgH;
+    const pdfTitle = (catalogues.find(c => c.id === currentCatalogueId) || {}).name || 'Trophy Catalogue';
+    const orderBtnH = shopWhatsappNumber ? 9 : 0;
+
+    function buildWhatsAppLink(item){
+      let msg = "Hi, I'd like to order:\n" + item.name;
+      const availableVariations = (item.variations || []).filter(v => !v.outOfStock);
+      if (availableVariations.length === 1){
+        const v = availableVariations[0];
+        const parts = [];
+        if (v.code) parts.push('Size ' + v.code);
+        if (v.inch) parts.push(v.inch + '"');
+        if (v.price) parts.push('Rs.' + v.price);
+        if (parts.length) msg += ' (' + parts.join(', ') + ')';
+      } else if (availableVariations.length > 1){
+        msg += ' — please confirm available size/price';
+      }
+      msg += '\n(From ' + pdfTitle + ' catalogue)';
+      return 'https://wa.me/' + shopWhatsappNumber + '?text=' + encodeURIComponent(msg);
+    }
+
+    // Skip items marked entirely out of stock, and also skip items whose every
+    // individual size is out of stock (nothing left to actually sell).
+    const inStockItems = items.filter(item => {
+      if (item.outOfStock) return false;
+      if (item.variations && item.variations.length > 0){
+        return item.variations.some(v => !v.outOfStock);
+      }
+      return true;
+    });
+
+    for (let i = 0; i < inStockItems.length; i++){
+      const posInPage = i % 4;
+      if (posInPage === 0){
+        if (i !== 0) doc.addPage();
+        doc.setFillColor(0,0,0);
+        doc.rect(0, 0, pageWidth, pageHeight, 'F');
+        doc.setFont('times', 'bold');
+        doc.setFontSize(26);
+        doc.setTextColor(240,195,65);
+        doc.text(pdfTitle, pageWidth/2, margin + 4, { align: 'center' });
+      }
+      const col = posInPage % cols;
+      const row = Math.floor(posInPage / cols);
+      const x = margin + col * (cellW + gap);
+      const y = margin + 12 + row * (cellH + gap);
+
+      const item = inStockItems[i];
+      const dims = await getImageDims(item.dataUrl);
+      const fitted = fitContain(dims.w, dims.h, cellW, imgH);
+      const imgX = x + (cellW - fitted.w) / 2;
+      const imgY = y + (imgH - fitted.h) / 2;
+
+      doc.setDrawColor(184,145,47);
+      doc.setLineWidth(0.6);
+      doc.rect(x, y, cellW, imgH);
+      doc.addImage(item.dataUrl, 'JPEG', imgX, imgY, fitted.w, fitted.h, undefined, 'FAST');
+
+      // light background panel behind the text so it stays readable
+      doc.setFillColor(232,224,206);
+      doc.rect(x, y + imgH, cellW, textH, 'F');
+      doc.setDrawColor(184,145,47);
+      doc.setLineWidth(0.4);
+      doc.rect(x, y + imgH, cellW, textH);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(20,20,20);
+      const maxTextWidth = cellW - 4;
+      const bottomLimit = y + cellH - 2 - orderBtnH;
+
+      // Fit the name + variation lines within the panel, shrinking font if needed
+      let nameSize = 20;
+      let varSize = 16;
+      let nameLines, totalLines;
+      do {
+        doc.setFontSize(nameSize);
+        nameLines = doc.splitTextToSize(item.name, maxTextWidth).slice(0, 2);
+        doc.setFontSize(varSize);
+        totalLines = [];
+        (item.variations || []).filter(v => !v.outOfStock).forEach(v => {
+          const parts = [];
+          if (v.code) parts.push(v.code);
+          if (v.inch) parts.push(v.inch + '"');
+          if (v.price) parts.push('Rs.' + v.price + ' MRP');
+          const line = parts.join('  -  ');
+          if (line) totalLines.push(...doc.splitTextToSize(line, maxTextWidth));
+        });
+        const nameBlockH = nameLines.length * (nameSize * 0.42);
+        const varBlockH = totalLines.length * (varSize * 0.42);
+        if (nameBlockH + varBlockH + 8 <= textH || (nameSize <= 12 && varSize <= 10)) break;
+        nameSize -= 1;
+        varSize -= 1;
+      } while (true);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(nameSize);
+      doc.setTextColor(20,20,20);
+      let cursorY = y + imgH + nameSize * 0.42;
+      nameLines.forEach(line => {
+        if (cursorY <= bottomLimit){
+          doc.text(line, x + 2, cursorY);
+          cursorY += nameSize * 0.42;
+        }
+      });
+
+      cursorY += 2;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(varSize);
+      doc.setTextColor(140,95,20);
+      totalLines.forEach(line => {
+        if (cursorY <= bottomLimit){
+          doc.text(line, x + 2, cursorY);
+          cursorY += varSize * 0.42;
+        }
+      });
+
+      if (shopWhatsappNumber){
+        const btnY = y + cellH - orderBtnH;
+        const btnH = orderBtnH - 1;
+        doc.setFillColor(37,150,90);
+        doc.rect(x, btnY, cellW, btnH, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(255,255,255);
+        doc.text('ORDER ON WHATSAPP', x + cellW/2, btnY + btnH/2 + 1.6, { align: 'center' });
+        doc.link(x, btnY, cellW, btnH, { url: buildWhatsAppLink(item) });
+      }
+    }
+
+    const currentCat = catalogues.find(c => c.id === currentCatalogueId);
+    const safeName = (currentCat ? currentCat.name : 'trophy-catalogue').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    doc.save(safeName + '.pdf');
+    statusEl.textContent = items.length + ' item(s) exported successfully.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Something went wrong generating the PDF.';
+  } finally {
+    exportBtn.disabled = false;
+  }
+});
+
+const exportOosBtn = document.getElementById('export-oos-btn');
+exportOosBtn.addEventListener('click', async () => {
+  // Gather every item that's either fully out of stock, or has at least one
+  // out-of-stock size — this is a restock reference, not a customer catalogue.
+  const entries = [];
+  items.forEach(item => {
+    if (item.outOfStock){
+      entries.push({ item, statusText: 'ENTIRE PRODUCT OUT OF STOCK' });
+    } else if (item.variations && item.variations.some(v => v.outOfStock)){
+      const outSizes = item.variations.filter(v => v.outOfStock)
+        .map(v => [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' '))
+        .filter(Boolean).join(', ');
+      entries.push({ item, statusText: 'OUT OF STOCK: ' + (outSizes || 'this size') });
+    }
+  });
+
+  if (entries.length === 0){
+    alert('Nothing is currently marked Out of Stock in this catalogue.');
+    return;
+  }
+
+  try {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageWidth = 210;
+    const pageHeight = 297;
+    const margin = 12;
+    const gap = 8;
+    const cols = 2, rows = 2;
+    const cellW = (pageWidth - margin*2 - gap) / cols;
+    const cellH = (pageHeight - margin*2 - gap - 14) / rows;
+    const imgH = cellH * 0.55;
+    const textH = cellH - imgH;
+    const currentCat = catalogues.find(c => c.id === currentCatalogueId);
+    const listTitle = (currentCat ? currentCat.name : 'Catalogue') + ' — Out of Stock';
+
+    for (let i = 0; i < entries.length; i++){
+      const posInPage = i % 4;
+      if (posInPage === 0){
+        if (i !== 0) doc.addPage();
+        doc.setFillColor(0,0,0);
+        doc.rect(0, 0, pageWidth, pageHeight, 'F');
+        doc.setFont('times', 'bold');
+        doc.setFontSize(22);
+        doc.setTextColor(224,112,90);
+        doc.text(listTitle, pageWidth/2, margin + 4, { align: 'center' });
+      }
+      const col = posInPage % cols;
+      const row = Math.floor(posInPage / cols);
+      const x = margin + col * (cellW + gap);
+      const y = margin + 12 + row * (cellH + gap);
+
+      const { item, statusText } = entries[i];
+      const dims = await getImageDims(item.dataUrl);
+      const fitted = fitContain(dims.w, dims.h, cellW, imgH);
+      const imgX = x + (cellW - fitted.w) / 2;
+      const imgY = y + (imgH - fitted.h) / 2;
+
+      doc.setDrawColor(224,112,90);
+      doc.setLineWidth(0.6);
+      doc.rect(x, y, cellW, imgH);
+      doc.addImage(item.dataUrl, 'JPEG', imgX, imgY, fitted.w, fitted.h, undefined, 'FAST');
+
+      doc.setFillColor(232,224,206);
+      doc.rect(x, y + imgH, cellW, textH, 'F');
+      doc.setDrawColor(224,112,90);
+      doc.setLineWidth(0.4);
+      doc.rect(x, y + imgH, cellW, textH);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.setTextColor(20,20,20);
+      const nameLines = doc.splitTextToSize(item.name, cellW - 4).slice(0, 2);
+      doc.text(nameLines, x + 2, y + imgH + 7);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(179,70,44);
+      const statusLines = doc.splitTextToSize(statusText, cellW - 4);
+      doc.text(statusLines, x + 2, y + imgH + 7 + (nameLines.length * 6));
+    }
+
+    const safeName = ((currentCat ? currentCat.name : 'catalogue') + '-out-of-stock').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    doc.save(safeName + '.pdf');
+    statusEl.textContent = entries.length + ' out-of-stock item(s) exported.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Something went wrong generating the Out of Stock PDF.';
+  }
+});
+
+exportExcelBtn.addEventListener('click', () => {
+  try {
+    const currentCat = catalogues.find(c => c.id === currentCatalogueId);
+    const rows = [];
+
+    items.forEach(item => {
+      if (item.variations && item.variations.length){
+        item.variations.forEach(v => {
+          rows.push({
+            'Product Name': item.name,
+            'Size Code': v.code || '',
+            'Height (inch)': v.inch || '',
+            'Price (MRP)': v.price || ''
+          });
+        });
+      } else {
+        rows.push({
+          'Product Name': item.name,
+          'Size Code': '',
+          'Height (inch)': '',
+          'Price (MRP)': ''
+        });
+      }
+    });
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 30 }, { wch: 12 }, { wch: 14 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Catalogue');
+
+    const safeName = (currentCat ? currentCat.name : 'trophy-catalogue').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    XLSX.writeFile(wb, safeName + '.xlsx');
+    statusEl.textContent = 'Excel file exported — ' + rows.length + ' row(s).';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Something went wrong generating the Excel file.';
+  }
+});
+
+exportPhotosBtn.addEventListener('click', async () => {
+  try {
+    statusEl.textContent = 'Preparing photos...';
+    exportPhotosBtn.disabled = true;
+
+    const currentCat = catalogues.find(c => c.id === currentCatalogueId);
+    const zip = new JSZip();
+    const usedNames = {};
+
+    items.forEach((item, idx) => {
+      let base = item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || ('product-' + (idx + 1));
+      let filename = base + '.jpg';
+      let counter = 2;
+      while (usedNames[filename]){
+        filename = base + '-' + counter + '.jpg';
+        counter++;
+      }
+      usedNames[filename] = true;
+
+      const base64 = item.dataUrl.split(',')[1];
+      zip.file(filename, base64, { base64: true });
+    });
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = (currentCat ? currentCat.name : 'trophy-catalogue').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    a.download = safeName + '-photos.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = items.length + ' photo(s) exported as a zip file.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Something went wrong exporting photos.';
+  } finally {
+    exportPhotosBtn.disabled = items.length === 0;
+  }
+});
+
+function getImageDims(dataUrl){
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({w: img.width, h: img.height});
+    img.src = dataUrl;
+  });
+}
+
+function fitContain(w, h, maxW, maxH){
+  const ratio = Math.min(maxW / w, maxH / h);
+  return { w: w * ratio, h: h * ratio };
+}
+
+// initialize: load the list of catalogues, pick up where the user left off, then load its items
+// WhatsApp order number removed from settings — exported PDFs have no "Order on WhatsApp" button.
+let shopWhatsappNumber = '';
+async function loadWhatsappNumber(){}
+
+// Exposed so the billing view can pull live product data (name, size, price)
+// straight from every saved catalogue, without needing a manual backup import.
+window.__getCatalogueProducts = async function(onBatch){
+  // Wait for the catalogue list to actually finish loading first — reading
+  // `catalogues` before that resolves used to silently return an empty list
+  // and wipe out Billing's cached products. Capped with a timeout so a
+  // stuck load can never hang this (and the Sync button) forever.
+  if (window.__catalogueReadyPromise){
+    await Promise.race([
+      window.__catalogueReadyPromise,
+      new Promise(resolve => setTimeout(resolve, 12000))
+    ]);
+  }
+  const products = [];
+  // Fetch every catalogue's items in parallel (and every item within a
+  // catalogue in parallel too) instead of one Firestore round-trip at a
+  // time — with several catalogues of 40-50+ items each, the old
+  // sequential version could take minutes on a mobile connection.
+  await Promise.all(catalogues.map(async (cat) => {
+    try {
+      const idxResult = await storage.get(indexKey(cat.id), true).catch(() => null);
+      const ids = idxResult && idxResult.value ? JSON.parse(idxResult.value) : [];
+      // Each item is handed over the moment it arrives (via onBatch), so
+      // Billing can start searching the first products straight away
+      // instead of waiting for every photo in every catalogue to download.
+      await Promise.all(ids.map(id => storage.get(itemKey(cat.id, id), true).catch(() => null).then(r => {
+        if (!r || !r.value) return;
+        let item;
+        try { item = JSON.parse(r.value); } catch (e) { return; }
+        if (item.outOfStock) return; // whole product unavailable — skip entirely
+        const itemProducts = [];
+        if (item.variations && item.variations.length){
+          item.variations.filter(v => !v.outOfStock).forEach(v => {
+            itemProducts.push({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.dataUrl || '' });
+          });
+        } else {
+          itemProducts.push({ name: item.name, code: '', inch: '', price: '', catalogueName: cat.name, photo: item.dataUrl || '' });
+        }
+        products.push(...itemProducts);
+        if (onBatch && itemProducts.length){
+          try { onBatch(itemProducts); } catch (e) { /* never let the UI callback break loading */ }
+        }
+      })));
+    } catch (e) { /* skip this catalogue if something's off, keep going */ }
+  }));
+  return products;
+};
+
+// Finds the closest-looking products across ALL catalogues for a given photo
+// (used by the Purchase view to auto-suggest MRP from a cropped supplier photo).
+window.__findMatchingProducts = async function(queryDataUrl, topN){
+  topN = topN || 5;
+  const queryHash = await computeImageHash(queryDataUrl);
+  const scored = [];
+
+  for (const cat of catalogues){
+    try {
+      const idxResult = await storage.get(indexKey(cat.id), true).catch(() => null);
+      const ids = idxResult && idxResult.value ? JSON.parse(idxResult.value) : [];
+      for (const id of ids){
+        const r = await storage.get(itemKey(cat.id, id), true).catch(() => null);
+        if (!r || !r.value) continue;
+        const item = JSON.parse(r.value);
+        let hash = item.hash;
+        if (!hash){
+          try { hash = await computeImageHash(item.dataUrl); } catch (e) { continue; }
+        }
+        const distance = hammingDistance(queryHash, hash);
+        const similarity = Math.round((1 - distance / queryHash.length) * 100);
+        scored.push({ name: item.name, variations: item.variations || [], catalogueName: cat.name, photo: item.dataUrl || '', similarity });
+      }
+    } catch (e) { /* skip this catalogue if something's off */ }
+  }
+
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, topN);
+};
+
+async function initApp(){
+  syncText.textContent = 'Loading catalogues...';
+  const loaded = await loadCatalogueList();
+  if (!loaded){
+    syncText.textContent = '⚠️ Could not load your catalogues — tap Retry. Nothing has been changed or deleted.';
+    syncText.style.color = 'var(--danger)';
+    refreshBtn.textContent = '↻ Retry';
+    // Don't leave other apps (Billing's product sync) waiting forever on a
+    // load that failed — let them proceed with whatever's in `catalogues`
+    // (likely empty) rather than hang. A fresh promise is set up so that if
+    // the person taps Retry and it succeeds, later waiters see that instead.
+    __resolveCatalogueReady();
+    refreshBtn.addEventListener('click', function retry(){
+      syncText.style.color = '';
+      refreshBtn.textContent = '↻ Refresh';
+      refreshBtn.removeEventListener('click', retry);
+      window.__catalogueReadyPromise = new Promise(res => { __resolveCatalogueReady = res; });
+      initApp();
+    }, { once: true });
+    return;
+  }
+  __resolveCatalogueReady(); // `catalogues` is populated now — safe for other apps to read
+  await loadWhatsappNumber();
+
+  let lastId = null;
+  try {
+    const r = await storage.get(LAST_CATALOGUE_KEY, false);
+    lastId = r ? r.value : null;
+  } catch (err) { /* no previous selection saved yet */ }
+
+  const validLast = catalogues.find(c => c.id === lastId);
+  currentCatalogueId = validLast ? validLast.id : catalogues[0].id;
+
+  renderCatalogueSelect();
+  await loadItemsFromStorage(false);
+  attachCatalogueListListener();
+  attachCatalogueItemsListener(currentCatalogueId);
+}
+
+
+initApp();
+
+})();
+</script>
+</body>
+</html>

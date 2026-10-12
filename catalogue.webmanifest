@@ -1,0 +1,25 @@
+{
+  "id": "./catalogue.html",
+  "name": "Catalogue",
+  "short_name": "Catalogue",
+  "start_url": "./catalogue.html",
+  "scope": "./catalogue",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [
+    {
+      "src": "catalogue-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "catalogue-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

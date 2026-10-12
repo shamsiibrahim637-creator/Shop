@@ -1,0 +1,2618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Billing">
+<title>Billing</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧾</text></svg>">
+<link rel="manifest" href="billing.webmanifest">
+<link rel="apple-touch-icon" href="billing-icon-192.png">
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<script>
+// ---- Firebase init (shared across all three apps for live cross-device sync) ----
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+window.__firebaseReady = false;
+try {
+  firebase.initializeApp(firebaseConfig);
+  window.__db = firebase.firestore();
+  // Keep a copy on the phone (only possible on a real web address) — faster
+  // repeat opens and it keeps working on a weak signal.
+  if (location.protocol === 'https:'){
+    window.__db.enablePersistence({ synchronizeTabs: true }).catch(err => console.warn('Offline copy not enabled:', err && err.code));
+  }
+  window.__firebaseReady = true;
+} catch (err) {
+  console.error('Firebase init failed:', err);
+}
+
+// ---- Shared cloud storage layer (Firestore), used by all three apps ------
+// Every app already talks to `storage.get/set/delete(key[, value])` exactly
+// like it did with IndexedDB — only the plumbing underneath changes.
+//
+// A single bill/purchase/catalogue-item list is saved as ONE JSON string
+// under one key (e.g. "all-bills"). Firestore caps a single document at
+// ~1MB, and that blob only grows over time as the shop's history builds up
+// — so instead of trying to keep photos small enough to always fit in one
+// document (which is what silently broke last time once the data grew),
+// large values are transparently split across several small "chunk"
+// documents and reassembled on read. This means saving can't silently fail
+// just because the data got big.
+const FIRESTORE_CHUNK_SIZE = 900000; // chars per chunk, safely under the ~1MB doc cap
+
+function makeFirestoreStorage(collectionName){
+  function coll(){ return window.__db.collection(collectionName); }
+  function safeId(key){ return String(key).replace(/\//g, '_SLASH_'); }
+  function chunkId(key, i){ return safeId(key) + '__chunk' + i; }
+
+  return {
+    async get(key){
+      const snap = await coll().doc(safeId(key)).get();
+      if (!snap.exists) return null;
+      const data = snap.data();
+      if (!data.chunked) return { key, value: data.value };
+      const n = data.chunkCount || 0;
+      const parts = await Promise.all(
+        Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get())
+      );
+      return { key, value: parts.map(p => (p.exists ? p.data().part : '')).join('') };
+    },
+    async set(key, value){
+      let prevChunkCount = 0;
+      try {
+        const prevSnap = await coll().doc(safeId(key)).get();
+        if (prevSnap.exists && prevSnap.data().chunked) prevChunkCount = prevSnap.data().chunkCount || 0;
+      } catch (e) { /* no previous doc — nothing to clean up */ }
+
+      const str = String(value);
+      if (str.length <= FIRESTORE_CHUNK_SIZE){
+        await coll().doc(safeId(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        if (prevChunkCount > 0){
+          await Promise.all(Array.from({ length: prevChunkCount }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+        return { key, value: str };
+      }
+
+      const chunks = [];
+      for (let i = 0; i < str.length; i += FIRESTORE_CHUNK_SIZE) chunks.push(str.slice(i, i + FIRESTORE_CHUNK_SIZE));
+      await Promise.all(chunks.map((part, i) => coll().doc(chunkId(key, i)).set({ part })));
+      await coll().doc(safeId(key)).set({ chunked: true, chunkCount: chunks.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      if (prevChunkCount > chunks.length){
+        await Promise.all(Array.from({ length: prevChunkCount - chunks.length }, (_, i) =>
+          coll().doc(chunkId(key, chunks.length + i)).delete().catch(() => {})
+        ));
+      }
+      return { key, value: str };
+    },
+    async delete(key){
+      try {
+        const snap = await coll().doc(safeId(key)).get();
+        if (snap.exists && snap.data().chunked){
+          const n = snap.data().chunkCount || 0;
+          await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+      } catch (e) { /* ignore — still try deleting the manifest below */ }
+      await coll().doc(safeId(key)).delete();
+      return { key, deleted: true };
+    },
+    async list(prefix){
+      return { keys: [] }; // not used by any app — kept only for interface compatibility
+    },
+    // Recovery helper: every saved value whose key starts with `prefix`
+    // (e.g. all products saved under one catalogue, even ones that have
+    // dropped out of its product list). Reassembles chunked values.
+    async listByPrefix(prefix){
+      const FP = firebase.firestore.FieldPath.documentId();
+      const start = safeId(prefix);
+      const snap = await coll().where(FP, '>=', start).where(FP, '<', start + '\uf8ff').get();
+      const out = [];
+      for (const d of snap.docs){
+        if (d.id.indexOf('__chunk') !== -1) continue;
+        const key = d.id.replace(/_SLASH_/g, '/');
+        const data = d.data() || {};
+        let value = null;
+        if (!data.chunked) value = data.value;
+        else { const r = await this.get(key); value = r ? r.value : null; }
+        if (value != null) out.push({ key, value });
+      }
+      return out;
+    },
+    // Bulk write for imports: writing hundreds of items one at a time (each
+    // a separate get-then-set round trip) is what actually broke large
+    // imports before — on a slow connection it can take so long the person
+    // assumes it's done and leaves the page, so only the first few items
+    // ever get saved. This uses Firestore's batch write instead, splitting
+    // batches by BOTH item count (max 400, Firestore's own per-batch limit)
+    // AND total data size (max ~8MB, safely under Firestore's ~10MB
+    // per-request cap) — photos mean a batch can hit the size limit long
+    // before it hits the count limit. Any single value still too big for
+    // one chunk falls back to the normal chunked set() afterwards.
+    async setMany(pairs){
+      const MAX_BATCH_OPS = 400;
+      const MAX_BATCH_BYTES = 8000000;
+      const overflow = [];
+      let batch = window.__db.batch();
+      let opsInBatch = 0;
+      let bytesInBatch = 0;
+
+      for (const [key, value] of pairs){
+        const str = String(value);
+        if (str.length > FIRESTORE_CHUNK_SIZE){ overflow.push([key, value]); continue; }
+
+        if (opsInBatch > 0 && (opsInBatch >= MAX_BATCH_OPS || bytesInBatch + str.length > MAX_BATCH_BYTES)){
+          await batch.commit();
+          batch = window.__db.batch();
+          opsInBatch = 0;
+          bytesInBatch = 0;
+        }
+
+        batch.set(coll().doc(safeId(key)), { chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        opsInBatch++;
+        bytesInBatch += str.length;
+      }
+      if (opsInBatch > 0) await batch.commit();
+
+      for (const [key, value] of overflow){
+        await this.set(key, value);
+      }
+    },
+    async getAllEntries(){ return this.listByPrefix(''); },
+    // Deletes everything in this collection except keepKeys.
+    async clearAll(keepKeys){
+      const keep = new Set(keepKeys || []);
+      const all = await this.listByPrefix('');
+      await Promise.all(all.filter(r => !keep.has(r.key)).map(r => this.delete(r.key).catch(() => null)));
+    },
+    // Real-time: cb(value) fires immediately with the current value, then
+    // again every time this key changes on any device. Returns an unsubscribe
+    // function.
+    onChange(key, cb){
+      return coll().doc(safeId(key)).onSnapshot(async (snap) => {
+        if (!snap.exists){ cb(null); return; }
+        const data = snap.data();
+        if (!data.chunked){ cb(data.value); return; }
+        const n = data.chunkCount || 0;
+        try {
+          const parts = await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get()));
+          cb(parts.map(p => (p.exists ? p.data().part : '')).join(''));
+        } catch (e) { console.error('Live update failed for', key, e); }
+      }, (err) => console.error('Live sync error for', key, err));
+    }
+  };
+}
+</script>
+<script>
+function makeLocalStorage(name){ return makeFirestoreStorage(name); }
+window.__switchView = function(){};
+</script>
+
+<style>
+
+  :root{
+    --brass: #b8912f;
+    --brass-light: #f0c341;
+    --navy: #050505;
+    --navy-2: #161616;
+    --cream: #ffffff;
+    --line: #3a3a3a;
+    --danger: #b3462c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--navy);
+    color: var(--cream);
+    min-height:100vh;
+  }
+  header{
+    padding: 30px 20px 22px;
+    text-align:center;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--navy-2), var(--navy));
+  }
+  header h1{
+    margin:0;
+    font-size: 32px;
+    letter-spacing: 1px;
+    color: var(--brass-light);
+    font-weight: 700;
+  }
+  header .medal{
+    font-size: 32px;
+    display:block;
+    margin-bottom: 8px;
+  }
+  header p{
+    margin: 10px 0 0;
+    font-family: Arial, sans-serif;
+    font-size: 15px;
+    font-weight:600;
+    color: var(--brass);
+    letter-spacing: 0.5px;
+  }
+  main{
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 16px 20px;
+  }
+  .add-card{
+    background: var(--navy-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 22px;
+  }
+  .add-card h2{
+    margin: 0 0 16px;
+    font-size: 18px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+  }
+  .field{
+    margin-bottom: 14px;
+  }
+  .field label{
+    display:block;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    font-weight:700;
+    color: var(--brass-light);
+    margin-bottom: 7px;
+  }
+  .field input[type="text"], .field input[type="number"]{
+    width:100%;
+    padding: 14px;
+    border-radius: 6px;
+    border: 1.5px solid var(--line);
+    background: var(--navy);
+    color: var(--cream);
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 20px;
+  }
+  .photo-input{
+    display:flex;
+    align-items:center;
+    gap: 12px;
+    flex-wrap:wrap;
+  }
+  .photo-input .upload-btn{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 13px 20px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 17px;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  .photo-input input[type="file"]{display:none;}
+  .native-file-input{
+    font-family: Arial, sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--cream);
+    width: 100%;
+    padding: 10px;
+    border: 1.5px solid var(--brass);
+    border-radius: 6px;
+    background: var(--navy);
+  }
+  .native-file-input::file-selector-button{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 12px 18px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    margin-right: 12px;
+  }
+  .native-file-input::-webkit-file-upload-button{
+    background: var(--brass);
+    color: #000;
+    border: none;
+    padding: 12px 18px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    margin-right: 12px;
+  }
+  #preview-thumb, #pv-preview-thumb{
+    width:60px;height:60px;border-radius:6px;object-fit:cover;
+    border:1.5px solid var(--brass); display:none;
+  }
+  #add-btn, #pv-add-btn{
+    width:100%;
+    margin-top: 8px;
+    background: var(--brass-light);
+    color: #000;
+    border:none;
+    padding: 16px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 19px;
+    letter-spacing:0.5px;
+    cursor:pointer;
+  }
+  #add-btn:disabled, #pv-add-btn:disabled{opacity:0.5; cursor:not-allowed;}
+  .var-chip{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    background: var(--navy);
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    padding: 11px 12px;
+    margin-bottom: 8px;
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 18px;
+  }
+  .var-chip .var-remove{
+    background:none; border:none; color:#e0705a; cursor:pointer; font-size:15px; font-weight:800;
+  }
+
+  .list-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    margin-bottom: 14px;
+  }
+  .list-header h2{
+    font-size: 18px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+    margin:0;
+  }
+  .list-header span{
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 15px;
+    color: var(--brass);
+  }
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .item-card{
+    background: var(--navy-2);
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    overflow:hidden;
+  }
+  .item-card.dragging{
+    opacity: 0.5;
+    border-color: var(--brass-light);
+  }
+  .drag-handle{
+    background: var(--navy);
+    color: var(--brass-light);
+    text-align:center;
+    padding: 8px 4px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    cursor: grab;
+    touch-action: pan-y;
+    border-bottom: 1px solid var(--line);
+    user-select: none;
+  }
+  .item-card img{
+    width:100%; height:130px; object-fit:cover; display:block;
+    background:#000;
+  }
+  .item-body{
+    padding: 10px 12px 12px;
+    font-family: Arial, sans-serif;
+  }
+  .item-body .name{
+    font-size:18px; font-weight:800; color:var(--cream); margin:0 0 4px;
+    white-space:normal; overflow-wrap:break-word;
+  }
+  .item-body .price{
+    font-size:18px; color:var(--brass-light); font-weight:800; margin:0;
+  }
+  .card-actions{
+    display:flex;
+    flex-direction:column;
+  }
+  .card-actions .row{
+    display:flex;
+  }
+  .card-actions button{
+    flex:1;
+    background:none;
+    border:none;
+    border-top:1.5px solid var(--line);
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 13px;
+    padding: 10px 2px;
+    cursor:pointer;
+  }
+  .move-btn{
+    color: #c9c9c9;
+    border-right:1.5px solid var(--line);
+  }
+  .move-btn:last-child{
+    border-right:none;
+  }
+  .move-btn:disabled{
+    opacity:0.3;
+    cursor:not-allowed;
+  }
+  .pp-move-btn{
+    color: #c9c9c9;
+    border-right:1.5px solid var(--line);
+  }
+  .pp-move-btn:last-child{
+    border-right:none;
+  }
+  .pp-move-btn:disabled{
+    opacity:0.3;
+    cursor:not-allowed;
+  }
+  .edit-btn{
+    color: var(--brass-light);
+    border-right:1.5px solid var(--line);
+    font-size:15px;
+  }
+  .remove-btn{
+    color:#e0705a;
+    font-size:15px;
+  }
+  .empty-state{
+    text-align:center;
+    color:#8a8a8a;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    font-weight:600;
+    padding: 34px 12px;
+    border: 1.5px dashed var(--line);
+    border-radius: 10px;
+    margin-bottom: 24px;
+  }
+  .footer-bar{
+    background: var(--navy-2);
+    border-top: 1px solid var(--line);
+    padding: 14px 16px 24px;
+    display:flex;
+    justify-content:center;
+  }
+  #export-btn, #pv-export-btn{
+    width:100%;
+    background: var(--brass);
+    color: #000;
+    border:none;
+    padding: 17px;
+    border-radius: 8px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 19px;
+    letter-spacing:0.5px;
+    cursor:pointer;
+  }
+  #export-btn:disabled, #pv-export-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #export-excel-btn:disabled, #pv-export-excel-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #export-photos-btn:disabled, #pv-export-photos-btn:disabled{opacity:0.4; cursor:not-allowed;}
+  #status, #pv-status{
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:600;
+    color: var(--brass-light);
+    text-align:center;
+    margin-top: 10px;
+  }
+
+
+  :root{
+    --brass: #b8912f;
+    --brass-light: #f0c341;
+    --navy: #050505;
+    --navy-2: #161616;
+    --cream: #ffffff;
+    --line: #3a3a3a;
+    --danger: #b3462c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--navy);
+    color: var(--cream);
+    min-height:100vh;
+  }
+  header{
+    padding: 30px 20px 22px;
+    text-align:center;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--navy-2), var(--navy));
+  }
+  header .emoji{
+    font-size: 32px;
+    display:block;
+    margin-bottom: 8px;
+  }
+  header h1{
+    margin:0;
+    font-size: 30px;
+    letter-spacing: 1px;
+    color: var(--brass-light);
+    font-weight: 700;
+  }
+  header p{
+    margin: 10px 0 0;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:600;
+    color: var(--brass);
+  }
+  main{
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 16px 40px;
+  }
+  .card{
+    background: var(--navy-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 20px;
+  }
+  .card h2{
+    margin: 0 0 14px;
+    font-size: 17px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--brass-light);
+  }
+  .field{
+    margin-bottom: 12px;
+  }
+  .field label{
+    display:block;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight:700;
+    color: var(--brass-light);
+    margin-bottom: 6px;
+  }
+  .field input[type="text"], .field input[type="number"], .field input[type="date"]{
+    width:100%;
+    padding: 12px;
+    border-radius: 6px;
+    border: 1.5px solid var(--line);
+    background: var(--navy);
+    color: var(--cream);
+    font-family: Arial, sans-serif;
+    font-weight:700;
+    font-size: 16px;
+  }
+  .row2{
+    display:flex;
+    gap:10px;
+  }
+  .row2 .field{ flex:1; }
+  .btn{
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-weight:800;
+    font-size: 15px;
+    cursor:pointer;
+    border: none;
+  }
+  .btn-gold{ background: var(--brass-light); color:#000; }
+  .btn-outline{ background:none; border:1.5px solid var(--brass); color:var(--brass-light); }
+  .btn-outline-line{ background:none; border:1.5px solid var(--line); color:#c9c9c9; }
+  .btn-danger{ background:none; border:1.5px solid var(--danger); color:#e0705a; }
+  .btn:disabled{ opacity:0.4; cursor:not-allowed; }
+  .btn-full{ width:100%; }
+  .tabs{ display:flex; gap:8px; margin-bottom:14px; }
+  .tab-btn{
+    flex:1; padding:11px; border-radius:6px; font-family:Arial,sans-serif; font-weight:800;
+    font-size:14px; cursor:pointer; border:1.5px solid var(--line); background:none; color:#c9c9c9;
+  }
+  .tab-btn.active{ border-color: var(--brass-light); color: var(--brass-light); background: rgba(240,195,65,0.08); }
+  .tab-panel{ display:none; }
+  .tab-panel.active{ display:block; }
+  .native-file-input{
+    font-family: Arial, sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--cream);
+    width: 100%;
+    padding: 10px;
+    border: 1.5px solid var(--brass);
+    border-radius: 6px;
+    background: var(--navy);
+  }
+  .native-file-input::file-selector-button{
+    background: var(--brass); color:#000; border:none; padding:11px 16px; border-radius:6px;
+    font-family: Arial, sans-serif; font-weight:800; font-size:14px; cursor:pointer; margin-right:12px;
+  }
+  .native-file-input::-webkit-file-upload-button{
+    background: var(--brass); color:#000; border:none; padding:11px 16px; border-radius:6px;
+    font-family: Arial, sans-serif; font-weight:800; font-size:14px; cursor:pointer; margin-right:12px;
+  }
+  .product-result{
+    background: var(--navy); border:1.5px solid var(--line); border-radius:6px; padding:10px; margin-bottom:8px; cursor:pointer;
+  }
+  .product-result:active{ border-color: var(--brass-light); }
+  .product-result .pname{ font-family:Arial,sans-serif; font-weight:800; font-size:15px; color:var(--cream); margin:0 0 4px; }
+  .product-result .psizes{ font-family:Arial,sans-serif; font-weight:700; font-size:13px; color:var(--brass-light); }
+  .size-chip{
+    display:inline-block; background: var(--navy-2); border:1.5px solid var(--brass); color:var(--brass-light);
+    border-radius:5px; padding:6px 10px; margin:4px 6px 0 0; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;
+  }
+  .size-chip.selected{ background: var(--brass-light); color:#000; }
+  .item-row{
+    display:flex; align-items:center; gap:8px; background:var(--navy); border:1.5px solid var(--line);
+    border-radius:6px; padding:10px; margin-bottom:8px; font-family:Arial,sans-serif;
+  }
+  .item-row .info{ flex:1; }
+  .item-row .iname{ font-weight:800; font-size:15px; color:var(--cream); margin:0; }
+  .item-row .isize{ font-weight:700; font-size:12px; color:#c9c9c9; margin:2px 0 0; }
+  .item-row input[type="number"]{
+    width:56px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream);
+    border-radius:5px; padding:6px; font-family:Arial,sans-serif; font-weight:800; font-size:14px;
+  }
+  .item-row .amount{ font-weight:800; font-size:15px; color:var(--brass-light); min-width:70px; text-align:right; }
+  .item-row .remove-item{ background:none; border:none; color:#e0705a; font-size:20px; cursor:pointer; padding:0 2px; }
+  .totals{ font-family:Arial,sans-serif; margin-top:10px; }
+  .totals .trow{ display:flex; justify-content:space-between; padding:6px 0; font-size:15px; font-weight:700; color:#c9c9c9; }
+  .totals .grand{ font-size:20px; font-weight:800; color:var(--brass-light); border-top:1.5px solid var(--line); margin-top:6px; padding-top:10px; }
+  .bill-card{
+    background: var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; font-family:Arial,sans-serif;
+  }
+  .bill-card .top{ display:flex; justify-content:space-between; align-items:baseline; }
+  .bill-card .inv{ font-weight:800; font-size:16px; color:var(--brass-light); }
+  .bill-card .amt{ font-weight:800; font-size:16px; color:var(--cream); }
+  .bill-card .meta{ font-size:13px; font-weight:600; color:#8a8a8a; margin:4px 0 10px; }
+  .bill-card .actions{ display:flex; gap:8px; }
+  .bill-card .actions button{ flex:1; padding:9px; font-size:12px; }
+  .status-pill{
+    display:inline-block; font-size:11px; font-weight:800; padding:3px 8px; border-radius:10px; margin-left:8px;
+  }
+  .status-paid{ background: rgba(76,175,80,0.2); color:#7cd992; }
+  .status-due{ background: rgba(224,112,90,0.2); color:#e0705a; }
+  .status-dispatched{ background: rgba(107,168,224,0.2); color:#6ba8e0; }
+  .status-notdispatched{ background: rgba(150,150,150,0.15); color:#9a9a9a; }
+  .bill-card .phone{ font-size:13px; font-weight:600; color:#8a8a8a; margin:-2px 0 4px; }
+  .bill-filter-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+  .bill-filter-chips .chip{
+    font-family:Arial,sans-serif; font-size:12px; font-weight:700; padding:6px 12px; border-radius:14px;
+    border:1.5px solid var(--line); background:transparent; color:#c9c9c9; cursor:pointer;
+  }
+  .bill-filter-chips .chip.active{ background: var(--brass); color:#000; border-color: var(--brass); }
+  #empty-bills{
+    text-align:center; color:#8a8a8a; font-family:Arial,sans-serif; font-size:15px; padding:24px 10px;
+    border:1.5px dashed var(--line); border-radius:10px;
+  }
+
+</style>
+</head>
+<body>
+<!-- ===== PIN lock: keeps casual visitors out of the app ===== -->
+<div id="pin-lock" style="position:fixed; inset:0; z-index:99999; background:#050505; display:flex; align-items:center; justify-content:center; padding:24px;">
+  <div style="width:100%; max-width:340px; text-align:center; font-family:Arial,sans-serif;">
+    <div style="font-size:44px; margin-bottom:6px;">🔒</div>
+    <h2 id="pin-title" style="font-family:Georgia,serif; color:#f0c341; letter-spacing:1px; margin:0 0 6px; font-size:24px;">Shop App</h2>
+    <p id="pin-msg" style="color:#c9c9c9; font-size:14px; margin:0 0 18px; line-height:1.4;">Checking...</p>
+    <input id="pin-input-1" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <input id="pin-input-2" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Repeat PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <button id="pin-go-btn" type="button" style="display:none; width:100%; padding:15px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:17px; cursor:pointer;">Unlock</button>
+    <button id="pin-cancel-btn" type="button" style="display:none; width:100%; margin-top:10px; padding:13px; border:1.5px solid #333; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+    <p id="pin-error" style="color:#e0705a; font-size:14px; font-weight:700; min-height:20px; margin:12px 0 0;"></p>
+    <p id="pin-help" style="display:none; color:#8a8a8a; font-size:12px; margin:14px 0 0; line-height:1.4;">Forgot the PIN? Open the app on a phone that's already unlocked and use 🔒 → Change PIN.</p>
+  </div>
+</div>
+
+<div id="app-topbar" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:#0a2a1a; border-bottom:1.5px solid #25d366; position:relative; font-family:Arial,sans-serif;">
+  <span style="font-size:12px; font-weight:700; color:#7cd992; white-space:nowrap;">☁️ Cloud</span>
+  <span style="display:flex; gap:6px;">
+    <button id="install-btn" type="button" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:7px 12px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap;">📲 Add to Home Screen</button>
+    <button id="pin-menu-btn" type="button" title="Lock / Change PIN" style="background:none; border:1px solid #25d366; color:#7cd992; border-radius:6px; padding:4px 9px; font-size:13px; cursor:pointer;">🔒</button>
+  </span>
+  <div id="pin-menu" style="display:none; position:absolute; right:8px; top:100%; margin-top:4px; z-index:9000; background:#161616; border:1.5px solid #b8912f; border-radius:8px; overflow:hidden; text-align:left;">
+    <button type="button" id="pin-lock-now" style="display:block; width:100%; padding:12px 18px; background:none; border:none; border-bottom:1px solid #333; color:#f0c341; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔒 Lock now</button>
+    <button type="button" id="pin-change" style="display:block; width:100%; padding:12px 18px; background:none; border:none; color:#c9c9c9; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔑 Change PIN</button>
+  </div>
+</div>
+<script>
+// ---- PIN lock ----
+// One PIN for the whole shop, stored (as a scrambled fingerprint, never the
+// PIN itself) in the cloud so it's the same on every phone. Once a phone is
+// unlocked it stays unlocked until you tap 🔒 → Lock now, or the PIN changes.
+// Note: this keeps casual visitors out of the app screen; it is not the same
+// as a full account login.
+(function(){
+  const lockEl = document.getElementById('pin-lock');
+  const titleEl = document.getElementById('pin-title');
+  const msgEl = document.getElementById('pin-msg');
+  const in1 = document.getElementById('pin-input-1');
+  const in2 = document.getElementById('pin-input-2');
+  const goBtn = document.getElementById('pin-go-btn');
+  const errEl = document.getElementById('pin-error');
+  const helpEl = document.getElementById('pin-help');
+  const PIN_KEY = 'app-pin';
+  const LOCAL_KEY = 'shopapp-unlocked-with';
+  const pinStore = makeFirestoreStorage('billing_kv');
+  let mode = 'checking'; // 'set' | 'unlock' | 'change'
+  let cloudPin = null;   // { hash, salt }
+
+  function fingerprint(pin, salt){
+    const s = salt + ':' + pin + ':shop-app';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let r = 0; r < 500; r++){ // repeated so guessing is slow
+      for (let i = 0; i < s.length; i++){
+        const ch = s.charCodeAt(i) + r;
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    }
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+  function localGet(){ try { return localStorage.getItem(LOCAL_KEY); } catch (e) { return null; } }
+  function localSet(v){ try { if (v) localStorage.setItem(LOCAL_KEY, v); else localStorage.removeItem(LOCAL_KEY); } catch (e) {} }
+
+  function showLock(newMode, message){
+    mode = newMode;
+    lockEl.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    titleEl.textContent = newMode === 'set' ? 'Set a PIN' : newMode === 'change' ? 'Change PIN' : 'Shop App';
+    msgEl.textContent = message;
+    errEl.textContent = '';
+    const typing = newMode !== 'checking';
+    in1.style.display = typing ? 'block' : 'none';
+    in2.style.display = (newMode === 'set' || newMode === 'change') ? 'block' : 'none';
+    goBtn.style.display = typing ? 'block' : 'none';
+    goBtn.textContent = newMode === 'unlock' ? 'Unlock' : 'Save PIN';
+    helpEl.style.display = newMode === 'unlock' ? 'block' : 'none';
+    document.getElementById('pin-cancel-btn').style.display = newMode === 'change' ? 'block' : 'none';
+    in1.value = ''; in2.value = '';
+    in1.placeholder = newMode === 'unlock' ? 'PIN' : 'New PIN';
+    if (typing) setTimeout(() => in1.focus(), 50);
+  }
+  function hideLock(){
+    lockEl.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function savePin(pin){
+    const salt = Math.random().toString(36).slice(2, 10);
+    const rec = { hash: fingerprint(pin, salt), salt };
+    await pinStore.set(PIN_KEY, JSON.stringify(rec));
+    cloudPin = rec;
+    localSet(rec.hash);
+  }
+
+  async function submit(){
+    errEl.textContent = '';
+    const p1 = in1.value.trim(), p2 = in2.value.trim();
+    if (!/^\d{4,8}$/.test(p1)){ errEl.textContent = 'PIN must be 4 to 8 digits.'; return; }
+    if (mode === 'unlock'){
+      if (cloudPin && fingerprint(p1, cloudPin.salt) === cloudPin.hash){
+        localSet(cloudPin.hash);
+        hideLock();
+      } else {
+        errEl.textContent = 'Wrong PIN — try again.';
+        in1.value = '';
+      }
+      return;
+    }
+    if (p1 !== p2){ errEl.textContent = 'The two PINs don\'t match.'; return; }
+    goBtn.disabled = true; goBtn.textContent = 'Saving...';
+    try {
+      await savePin(p1);
+      hideLock();
+      if (mode === 'change') alert('PIN changed ✓ — other phones will ask for the new PIN next time.');
+    } catch (e) {
+      errEl.textContent = 'Could not save the PIN — check your internet and try again.';
+    } finally {
+      goBtn.disabled = false; goBtn.textContent = 'Save PIN';
+    }
+  }
+  goBtn.addEventListener('click', submit);
+  document.getElementById('pin-cancel-btn').addEventListener('click', hideLock);
+  [in1, in2].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  async function start(){
+    showLock('checking', 'Checking...');
+    let r;
+    try {
+      r = await pinStore.get(PIN_KEY);
+    } catch (e) {
+      // Offline: a phone that was already unlocked keeps working.
+      if (localGet()) { hideLock(); return; }
+      showLock('checking', 'Can\'t reach the internet to check the PIN. Connect and reopen the app.');
+      return;
+    }
+    if (!r || !r.value){
+      showLock('set', 'Choose a 4–8 digit PIN for your shop app. Everyone using the app will need it once on each phone.');
+      return;
+    }
+    try { cloudPin = JSON.parse(r.value); } catch (e) { cloudPin = null; }
+    if (cloudPin && localGet() === cloudPin.hash){ hideLock(); return; }
+    showLock('unlock', 'Enter your shop PIN.');
+  }
+
+  // 🔒 menu
+  const menuBtn = document.getElementById('pin-menu-btn');
+  const menu = document.getElementById('pin-menu');
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; });
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.getElementById('pin-lock-now').addEventListener('click', () => {
+    localSet(null);
+    showLock('unlock', 'Locked. Enter your shop PIN.');
+  });
+  document.getElementById('pin-change').addEventListener('click', () => {
+    // This phone is already unlocked, so it's trusted to set a new PIN.
+    showLock('change', 'Type a new 4–8 digit PIN twice. All phones will need the new PIN once.');
+  });
+
+  start();
+})();
+</script>
+<script>
+// ---- "Add to Home Screen" ----
+(function(){
+  const btn = document.getElementById('install-btn');
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none'; // already opened from the home-screen icon
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.addEventListener('click', async () => {
+    if (deferred){
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) {}
+      deferred = null;
+      return;
+    }
+    if (location.protocol !== 'https:'){
+      alert('To add this app to your home screen, open it from its web address (your GitHub link) — not from a downloaded or WhatsApp file.');
+      return;
+    }
+    alert('Your phone didn\'t offer the quick install, so add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker not registered:', err));
+  }
+})();
+</script>
+
+<div id="view-billing">
+
+
+<header>
+  <span class="emoji">🧾</span>
+  <h1>Billing App</h1>
+  <p id="header-shopname">Set up your shop name below to get started</p>
+</header>
+
+<main>
+
+  <div class="card">
+    <h2>Shop Details</h2>
+
+    <div id="shop-details-summary" style="display:none; font-family:Arial,sans-serif;">
+      <p style="margin:0 0 4px; font-size:17px; font-weight:800; color:var(--cream);" id="summary-shop-name"></p>
+      <p style="margin:0 0 14px; font-size:14px; font-weight:600; color:#c9c9c9;" id="summary-shop-contact"></p>
+      <button type="button" id="edit-shop-btn" class="btn btn-outline btn-full">✎ Edit Shop Details</button>
+    </div>
+
+    <div id="shop-details-form">
+      <div class="field">
+        <label>Shop Name</label>
+        <input type="text" id="shop-name" placeholder="e.g. Ibrahim Trophy House">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Phone</label>
+          <input type="text" id="shop-phone" placeholder="Phone number">
+        </div>
+        <div class="field">
+          <label>Address</label>
+          <input type="text" id="shop-address" placeholder="Shop address">
+        </div>
+      </div>
+      <button type="button" id="save-shop-btn" class="btn btn-gold btn-full">Save Shop Details</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📦 Catalogue Products</h2>
+    <p style="font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; margin:0 0 12px; line-height:1.4;">Products come straight from your Catalogue app in the cloud — no file needed. They load by themselves when Billing opens; tap Refresh after you change a catalogue.</p>
+    <button type="button" id="sync-catalogue-btn" class="btn btn-gold btn-full">🔄 Refresh Products</button>
+    <p id="catalogue-product-count" style="font-family:Arial,sans-serif; font-size:13px; font-weight:700; color:var(--brass-light); margin:10px 0 0;">Loading products...</p>
+  </div>
+
+  <div class="card">
+    <h2>💾 Backup Billing Data</h2>
+    <p style="font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; margin:0 0 12px; line-height:1.4;">☁️ Saved in the cloud — the same on every phone. Export a backup now and then to keep your own copy. <b>Import Backup replaces ALL billing data in the cloud</b> — use it once to bring your phone's bills here.</p>
+    <div style="display:flex; gap:8px;">
+      <button type="button" id="export-billing-backup-btn" class="btn btn-gold" style="flex:1;">⬇ Export Backup</button>
+      <button type="button" id="import-billing-backup-btn" class="btn btn-outline-line" style="flex:1;">⬆ Import Backup</button>
+    </div>
+    <input type="file" id="import-billing-backup-file" accept="application/json,.json" style="display:none;">
+    <p id="billing-backup-status" style="font-family:Arial,sans-serif; font-size:13px; font-weight:700; color:var(--brass-light); margin:10px 0 0;"></p>
+  </div>
+
+  <div class="card">
+    <h2 id="bill-form-title">New Bill</h2>
+    <div class="row2">
+      <div class="field">
+        <label>Invoice No.</label>
+        <input type="number" id="invoice-no">
+      </div>
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="bill-date">
+      </div>
+    </div>
+    <div class="field">
+      <label>Use a Saved Customer (optional)</label>
+      <input type="text" id="customer-picker-search" placeholder="🔍 Search a previous customer by name or phone...">
+      <div id="customer-picker-results"></div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Customer Name</label>
+        <input type="text" id="customer-name" placeholder="Customer name">
+      </div>
+      <div class="field">
+        <label>Customer Phone</label>
+        <input type="text" id="customer-phone" placeholder="Phone (optional)">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Customer Address (optional)</label>
+        <input type="text" id="customer-address" placeholder="Address (optional)">
+      </div>
+      <div class="field">
+        <label>Bill Made By</label>
+        <input type="text" id="bill-made-by" placeholder="Your name">
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button type="button" class="tab-btn active" id="tab-catalogue-btn">📦 From Catalogue</button>
+      <button type="button" class="tab-btn" id="tab-manual-btn">✏️ Manual Entry</button>
+    </div>
+
+    <div class="tab-panel active" id="tab-catalogue-panel">
+      <div class="field">
+        <label>🔍 Search product</label>
+        <input type="text" id="product-search" placeholder="Search by name or size code...">
+      </div>
+      <div id="product-results"></div>
+    </div>
+
+    <div class="tab-panel" id="tab-manual-panel">
+      <div class="field">
+        <label>Item Name</label>
+        <input type="text" id="manual-name" placeholder="e.g. Custom Medal">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Quantity</label>
+          <input type="number" id="manual-qty" value="1" min="1">
+        </div>
+        <div class="field">
+          <label>Rate (Rs.)</label>
+          <input type="number" id="manual-rate" placeholder="0">
+        </div>
+      </div>
+      <button type="button" id="add-manual-item-btn" class="btn btn-gold btn-full">+ Add to Bill</button>
+    </div>
+
+    <div id="bill-items-list" style="margin-top:16px;"></div>
+    <div id="no-items-msg" style="font-family:Arial,sans-serif; font-size:14px; color:#8a8a8a; text-align:center; padding:14px;">No items added yet.</div>
+
+    <h2 style="margin-top:18px;">💰 Pricing &amp; Charges</h2>
+    <div class="row2">
+      <div class="field">
+        <label>Discount (%)</label>
+        <input type="number" id="discount-percent-input" placeholder="0" value="50" min="0" max="100">
+      </div>
+      <div class="field">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="gst-enabled-input" style="width:18px; height:18px;">
+          GST (%)
+        </label>
+        <input type="number" id="gst-percent-input" placeholder="0" value="0" min="0" max="100" disabled>
+      </div>
+    </div>
+    <div class="field" style="margin-top:2px;">
+      <label style="display:flex; align-items:center; gap:8px;">
+        <input type="checkbox" id="packing-auto-input" checked style="width:18px; height:18px;">
+        Auto-calculate Packing
+      </label>
+      <input type="number" id="packing-override-input" placeholder="0" value="0" min="0" disabled>
+    </div>
+    <p style="font-family:Arial,sans-serif; font-size:12px; color:#8a8a8a; margin:8px 0 0; line-height:1.4;">Packing: Rs. 300 flat up to Rs. 8,000 (after discount), else 4%. Uncheck to set a custom amount or 0 to remove it. GST (if on) applies after discount + packing.</p>
+
+    <div class="field" style="margin-top:10px;">
+      <label>Transport Name (optional)</label>
+      <input type="text" id="transport-input" placeholder="e.g. Blue Dart, VRL, self pickup...">
+    </div>
+
+    <div class="field" style="margin-top:10px;">
+      <label style="display:flex; align-items:center; gap:8px;">
+        <input type="checkbox" id="round-off-input" checked style="width:18px; height:18px;">
+        Auto Round Off (Grand Total to nearest Rupee)
+      </label>
+    </div>
+
+    <div class="field" style="margin-top:10px;">
+      <label>Advance Received (Rs.) — optional</label>
+      <input type="number" id="advance-input" placeholder="0" min="0" inputmode="decimal">
+    </div>
+
+    <div class="totals">
+      <div class="trow"><span>Subtotal</span><span id="subtotal-display">Rs. 0</span></div>
+      <div class="trow"><span id="discount-label">Discount</span><span id="discount-display">- Rs. 0</span></div>
+      <div class="trow"><span>Packing</span><span id="packing-display">+ Rs. 0</span></div>
+      <div class="trow" id="gst-row" style="display:none;"><span id="gst-label">GST</span><span id="gst-display">+ Rs. 0</span></div>
+      <div class="trow" id="roundoff-row" style="display:none;"><span>Round Off</span><span id="roundoff-display">Rs. 0</span></div>
+      <div class="trow grand"><span>Grand Total</span><span id="total-display">Rs. 0</span></div>
+      <div class="trow" id="advance-row" style="display:none;"><span>Advance Received</span><span id="advance-display">- Rs. 0</span></div>
+      <div class="trow grand" id="balance-row" style="display:none; color:#e0705a;"><span id="balance-label">Balance Due</span><span id="balance-display">Rs. 0</span></div>
+    </div>
+
+    <div style="display:flex; gap:10px; margin-top:16px;">
+      <button type="button" id="save-bill-btn" class="btn btn-gold" style="flex:2;">💾 Save Bill</button>
+      <button type="button" id="clear-bill-btn" class="btn btn-outline-line" style="flex:1;">Clear</button>
+    </div>
+    <button type="button" id="export-current-pdf-btn" class="btn btn-outline btn-full" style="margin-top:10px;">🖨️ Export This Bill as PDF</button>
+    <button type="button" id="wa-direct-current-btn" class="btn btn-full" style="margin-top:10px; background:#25d366; color:#000; border:none;">💬 Send Estimate to Customer's WhatsApp</button>
+    <button type="button" id="share-current-pdf-btn" class="btn btn-full" style="margin-top:10px; background:none; color:#25d366; border:1.5px solid #25d366;">📤 Send PDF via WhatsApp (choose contact)</button>
+    <div id="bill-status-msg" style="font-family:Arial,sans-serif; font-size:13px; font-weight:600; color:var(--brass-light); text-align:center; margin-top:8px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>Bill History</h2>
+    <div class="field">
+      <input type="text" id="bill-search" placeholder="🔍 Search by invoice number, customer name or phone...">
+    </div>
+    <div class="bill-filter-chips">
+      <button type="button" class="chip active" data-filter="all">All</button>
+      <button type="button" class="chip" data-filter="paid">Paid</button>
+      <button type="button" class="chip" data-filter="due">Due</button>
+      <button type="button" class="chip" data-filter="dispatched">Dispatched</button>
+      <button type="button" class="chip" data-filter="notdispatched">Not Dispatched</button>
+    </div>
+    <div id="empty-bills">No bills saved yet.</div>
+    <div id="bills-list"></div>
+  </div>
+</main>
+
+
+</div>
+
+
+<script>
+// ================= BILLING APP =================
+(function(){
+
+// ---- Cloud storage layer (Firestore) — see the shared factory up in <head> ----
+const storage = makeLocalStorage('billing_kv');
+// --------------------------------------------------------------------------
+
+const { jsPDF } = window.jspdf || { jsPDF: function(){ alert('The PDF tool could not load — connect to the internet once and reopen the app.'); throw new Error('PDF tool not loaded'); } };
+
+let shopSettings = { name: '', phone: '', address: '' };
+let catalogueProducts = []; // [{name, code, inch, price}]
+let bills = []; // [{id, invoiceNo, date, customerName, customerPhone, items:[{name,size,qty,rate}], discount}]
+let currentItems = [];
+let editingBillId = null;
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+function money(n){
+  return 'Rs. ' + (Math.round(n * 100) / 100).toLocaleString('en-IN');
+}
+function todayStr(){
+  const d = new Date();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return d.getFullYear() + '-' + m + '-' + day;
+}
+
+// Converts the date input's ISO format (YYYY-MM-DD) into DD-MM-YYYY for the PDF.
+function formatDateDMY(dateStr){
+  if (!dateStr) return '';
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  const [yyyy, mm, dd] = parts;
+  return dd + '-' + mm + '-' + yyyy;
+}
+
+// ---- Elements ----
+const shopNameInput = document.getElementById('shop-name');
+const shopPhoneInput = document.getElementById('shop-phone');
+const shopAddressInput = document.getElementById('shop-address');
+const headerShopname = document.getElementById('header-shopname');
+const saveShopBtn = document.getElementById('save-shop-btn');
+
+const catalogueProductCount = document.getElementById('catalogue-product-count');
+
+const billFormTitle = document.getElementById('bill-form-title');
+const invoiceNoInput = document.getElementById('invoice-no');
+const billDateInput = document.getElementById('bill-date');
+const customerNameInput = document.getElementById('customer-name');
+const customerPhoneInput = document.getElementById('customer-phone');
+const customerAddressInput = document.getElementById('customer-address');
+const billMadeByInput = document.getElementById('bill-made-by');
+const customerPickerSearch = document.getElementById('customer-picker-search');
+const customerPickerResults = document.getElementById('customer-picker-results');
+
+const tabCatalogueBtn = document.getElementById('tab-catalogue-btn');
+const tabManualBtn = document.getElementById('tab-manual-btn');
+const tabCataloguePanel = document.getElementById('tab-catalogue-panel');
+const tabManualPanel = document.getElementById('tab-manual-panel');
+
+const productSearch = document.getElementById('product-search');
+const productResults = document.getElementById('product-results');
+
+const manualName = document.getElementById('manual-name');
+const manualQty = document.getElementById('manual-qty');
+const manualRate = document.getElementById('manual-rate');
+const addManualItemBtn = document.getElementById('add-manual-item-btn');
+
+// Force key text fields to always be uppercase as you type
+function forceUppercase(input){
+  input.addEventListener('input', () => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    input.value = input.value.toUpperCase();
+    input.setSelectionRange(start, end);
+  });
+}
+forceUppercase(shopNameInput);
+forceUppercase(shopAddressInput);
+forceUppercase(customerNameInput);
+forceUppercase(customerAddressInput);
+forceUppercase(billMadeByInput);
+forceUppercase(manualName);
+
+const billItemsList = document.getElementById('bill-items-list');
+const noItemsMsg = document.getElementById('no-items-msg');
+const discountPercentInput = document.getElementById('discount-percent-input');
+const gstEnabledInput = document.getElementById('gst-enabled-input');
+const gstPercentInput = document.getElementById('gst-percent-input');
+const packingAutoInput = document.getElementById('packing-auto-input');
+const packingOverrideInput = document.getElementById('packing-override-input');
+const transportInput = document.getElementById('transport-input');
+forceUppercase(transportInput);
+const subtotalDisplay = document.getElementById('subtotal-display');
+const discountLabel = document.getElementById('discount-label');
+const discountDisplay = document.getElementById('discount-display');
+const packingDisplay = document.getElementById('packing-display');
+const gstRow = document.getElementById('gst-row');
+const gstLabel = document.getElementById('gst-label');
+const gstDisplay = document.getElementById('gst-display');
+const totalDisplay = document.getElementById('total-display');
+const advanceInput = document.getElementById('advance-input');
+const roundOffInput = document.getElementById('round-off-input');
+const roundOffRow = document.getElementById('roundoff-row');
+const roundOffDisplay = document.getElementById('roundoff-display');
+// Remember the Round Off choice for new bills on this phone.
+let roundOffDefault = true;
+roundOffInput.addEventListener('change', () => {
+  if (!editingBillId){
+    roundOffDefault = roundOffInput.checked;
+    storage.set('round-off-default', roundOffDefault ? '1' : '0').catch(() => null);
+  }
+  updateTotals();
+});
+storage.get('round-off-default').then(r => {
+  if (r && r.value != null){ roundOffDefault = r.value === '1'; if (!editingBillId){ roundOffInput.checked = roundOffDefault; updateTotals(); } }
+}).catch(() => null);
+const advanceRow = document.getElementById('advance-row');
+const advanceDisplay = document.getElementById('advance-display');
+const balanceRow = document.getElementById('balance-row');
+const balanceLabel = document.getElementById('balance-label');
+const balanceDisplay = document.getElementById('balance-display');
+
+gstEnabledInput.addEventListener('change', () => {
+  gstPercentInput.disabled = !gstEnabledInput.checked;
+  if (!gstEnabledInput.checked) gstPercentInput.value = 0;
+  updateTotals();
+});
+
+packingAutoInput.addEventListener('change', () => {
+  packingOverrideInput.disabled = packingAutoInput.checked;
+  updateTotals();
+});
+packingOverrideInput.addEventListener('input', () => {
+  if (!packingAutoInput.checked) updateTotals();
+});
+
+const saveBillBtn = document.getElementById('save-bill-btn');
+const clearBillBtn = document.getElementById('clear-bill-btn');
+const exportCurrentPdfBtn = document.getElementById('export-current-pdf-btn');
+const billStatusMsg = document.getElementById('bill-status-msg');
+
+const billSearch = document.getElementById('bill-search');
+const emptyBills = document.getElementById('empty-bills');
+let billStatusFilter = 'all';
+const billsList = document.getElementById('bills-list');
+
+// ---- Shop settings ----
+const shopDetailsForm = document.getElementById('shop-details-form');
+const shopDetailsSummary = document.getElementById('shop-details-summary');
+const summaryShopName = document.getElementById('summary-shop-name');
+const summaryShopContact = document.getElementById('summary-shop-contact');
+const editShopBtn = document.getElementById('edit-shop-btn');
+
+function showShopSummary(){
+  summaryShopName.textContent = shopSettings.name || '(no shop name set)';
+  summaryShopContact.textContent = [shopSettings.phone, shopSettings.address].filter(Boolean).join('  •  ');
+  shopDetailsForm.style.display = 'none';
+  shopDetailsSummary.style.display = 'block';
+}
+function showShopForm(){
+  shopDetailsForm.style.display = 'block';
+  shopDetailsSummary.style.display = 'none';
+}
+
+editShopBtn.addEventListener('click', showShopForm);
+
+async function loadShopSettings(){
+  try {
+    const r = await storage.get('shop-settings');
+    if (r && r.value) shopSettings = JSON.parse(r.value);
+  } catch (e) { /* first run */ }
+  shopNameInput.value = shopSettings.name || '';
+  shopPhoneInput.value = shopSettings.phone || '';
+  shopAddressInput.value = shopSettings.address || '';
+  headerShopname.textContent = shopSettings.name ? shopSettings.name : 'Set up your shop name below to get started';
+
+  // If details are already saved, keep the form tucked away by default so it
+  // doesn't get bumped/edited by accident — only the summary + Edit button show.
+  if (shopSettings.name){
+    showShopSummary();
+  } else {
+    showShopForm();
+  }
+}
+saveShopBtn.addEventListener('click', async () => {
+  shopSettings = {
+    name: shopNameInput.value.trim(),
+    phone: shopPhoneInput.value.trim(),
+    address: shopAddressInput.value.trim()
+  };
+  await storage.set('shop-settings', JSON.stringify(shopSettings));
+  headerShopname.textContent = shopSettings.name || 'Set up your shop name below to get started';
+  billStatusMsg.textContent = '';
+  showShopSummary();
+});
+
+// ---- Catalogue products (live from your cloud catalogues) ----
+// Read straight from the Catalogue app's cloud data, every catalogue and
+// every product in parallel, shown as they arrive so search works at once.
+// Nothing is copied back up — that's what used to make Billing slow.
+const catalogueStore = makeFirestoreStorage('catalogue_kv');
+const syncCatalogueBtn = document.getElementById('sync-catalogue-btn');
+let liveProducts = [];
+let productsLoading = false;
+let productsLoadedOnce = false;
+let rebuildTimer = null;
+
+function refreshProductCount(){
+  const n = catalogueProducts.length;
+  catalogueProductCount.textContent = productsLoading
+    ? ('⏳ Loading products… ' + n + ' found so far (you can search already)')
+    : (n + ' product size(s) loaded from your catalogues');
+}
+function rebuildCatalogueProducts(){
+  catalogueProducts = liveProducts;
+  refreshProductCount();
+  if (productSearch.value.trim() && !productResults.querySelector('.product-result-card')) renderProductResults();
+}
+function scheduleRebuild(){
+  if (rebuildTimer) return;
+  rebuildTimer = setTimeout(() => { rebuildTimer = null; rebuildCatalogueProducts(); }, 300);
+}
+
+async function readCloudCatalogueProducts(onBatch){
+  const listR = await catalogueStore.get('catalogue-list');
+  const cats = listR && listR.value ? JSON.parse(listR.value) : [];
+  const products = [];
+  await Promise.all(cats.map(async (cat) => {
+    try {
+      const idx = await catalogueStore.get('index:' + cat.id);
+      const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+      await Promise.all(ids.map(id => catalogueStore.get('item:' + cat.id + ':' + id).catch(() => null).then(r => {
+        if (!r || !r.value) return;
+        let item;
+        try { item = JSON.parse(r.value); } catch (e) { return; }
+        if (item.outOfStock) return;
+        const vars = item.variations && item.variations.length ? item.variations : [{}];
+        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.dataUrl || '' }));
+        products.push(...out);
+        if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
+      })));
+    } catch (e) { console.error('Skipped catalogue', cat && cat.name, e); }
+  }));
+  return products;
+}
+
+async function syncCatalogueProductsNow(showFeedback){
+  if (productsLoading) return;
+  productsLoading = true;
+  const firstLoad = !productsLoadedOnce;
+  if (showFeedback){ syncCatalogueBtn.disabled = true; syncCatalogueBtn.textContent = '⏳ Refreshing...'; }
+  refreshProductCount();
+  const collected = [];
+  try {
+    await readCloudCatalogueProducts(batch => {
+      collected.push(...batch);
+      if (firstLoad){ liveProducts = collected.slice(); scheduleRebuild(); }
+    });
+    if (collected.length === 0 && liveProducts.length > 0 && !showFeedback) return; // never swap a good list for an empty one silently
+    liveProducts = collected;
+    productsLoadedOnce = true;
+  } catch (err) {
+    console.error(err);
+    if (showFeedback) alert('Could not load products — check your internet and tap Refresh again.');
+  } finally {
+    productsLoading = false;
+    if (rebuildTimer){ clearTimeout(rebuildTimer); rebuildTimer = null; }
+    rebuildCatalogueProducts();
+    if (productSearch.value.trim()) renderProductResults();
+    if (showFeedback){ syncCatalogueBtn.disabled = false; syncCatalogueBtn.textContent = '🔄 Refresh Products'; }
+  }
+}
+syncCatalogueBtn.addEventListener('click', () => syncCatalogueProductsNow(true));
+
+// ---- Backup / restore ALL billing data on this phone ----
+const billingBackupStatus = document.getElementById('billing-backup-status');
+document.getElementById('export-billing-backup-btn').addEventListener('click', async () => {
+  try {
+    billingBackupStatus.textContent = '⏳ Preparing backup...';
+    const entries = {};
+    (await storage.getAllEntries()).forEach(r => { entries[r.key] = r.value; });
+    const backup = { type: 'shop-billing-backup', version: 1, exportedAt: new Date().toISOString(), shopName: shopSettings.name || '', entries };
+    const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'billing-backup-' + formatDateDMY(todayStr()) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    billingBackupStatus.textContent = '✅ Backup downloaded — ' + bills.length + ' bill(s). Keep it safe (e.g. in Google Drive).';
+  } catch (err) {
+    console.error(err);
+    billingBackupStatus.textContent = '';
+    alert('Could not create the backup: ' + (err && err.message ? err.message : err));
+  }
+});
+const billingBackupFile = document.getElementById('import-billing-backup-file');
+document.getElementById('import-billing-backup-btn').addEventListener('click', () => billingBackupFile.click());
+billingBackupFile.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  billingBackupFile.value = '';
+  if (!file) return;
+  let backup;
+  try { backup = JSON.parse(await file.text()); } catch (err) { alert('That file could not be read.'); return; }
+  if (!backup || backup.type !== 'shop-billing-backup' || !backup.entries){
+    alert(backup && backup.type === 'trophy-catalogue-backup'
+      ? 'That is a catalogue backup — import it in the "Catalogue Products" box above instead.'
+      : 'That is not a billing backup file.');
+    return;
+  }
+  let billCount = 0;
+  try { billCount = JSON.parse(backup.entries['all-bills'] || '[]').length; } catch (err) {}
+  if (!confirm('Restore this backup' + (backup.exportedAt ? ' from ' + formatDateDMY(backup.exportedAt.slice(0, 10)) : '') + ' (' + billCount + ' bills)?\n\n⚠️ This REPLACES all billing data in the cloud (on every phone). Export a backup first if you want to keep the current data.')) return;
+  try {
+    billingBackupStatus.textContent = '⏳ Restoring...';
+    await storage.clearAll(['app-pin']); // your PIN stays
+    // Catalogue copies imported into the phone app aren't needed — products now come live from the cloud.
+    await storage.setMany(Object.entries(backup.entries).filter(([k]) => k !== 'app-pin' && !k.startsWith('billing-catalogue') && k !== 'catalogue-products' && k !== 'imported-catalogue-products'));
+    alert('✅ Restored ' + billCount + ' bill(s). The app will now reload.');
+    location.reload();
+  } catch (err) {
+    console.error(err);
+    alert('Restore failed: ' + (err && err.message ? err.message : err));
+  }
+});
+
+// ---- Tabs ----
+tabCatalogueBtn.addEventListener('click', () => {
+  tabCatalogueBtn.classList.add('active');
+  tabManualBtn.classList.remove('active');
+  tabCataloguePanel.classList.add('active');
+  tabManualPanel.classList.remove('active');
+});
+tabManualBtn.addEventListener('click', () => {
+  tabManualBtn.classList.add('active');
+  tabCatalogueBtn.classList.remove('active');
+  tabManualPanel.classList.add('active');
+  tabCataloguePanel.classList.remove('active');
+});
+
+// ---- Product search (from imported catalogue) ----
+// Shows each matching product as a full card — photo, name, and every one
+// of its sizes listed with its price right there (same look as the
+// Catalogue app's own product cards), with a Qty box and an "+ Add" button
+// on each size so you can add straight from the search results — no extra
+// tap-to-open step needed.
+function groupProductsByName(query){
+  const q = query.trim().toLowerCase();
+  const groups = {};
+  catalogueProducts.forEach(p => {
+    const nameMatch = p.name.toLowerCase().includes(q);
+    const codeMatch = (p.code || '').toLowerCase().includes(q);
+    if (q && !nameMatch && !codeMatch) return;
+    if (!groups[p.name]) groups[p.name] = [];
+    groups[p.name].push(p);
+  });
+  return groups;
+}
+
+function buildProductCard(name, variants){
+  const photo = variants.find(v => v.photo)?.photo || '';
+  const card = document.createElement('div');
+  card.className = 'product-result-card';
+  card.style.cssText = 'background:var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; font-family:Arial,sans-serif;';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex; gap:10px; align-items:center; margin-bottom:8px;';
+  header.innerHTML = `
+    ${photo ? `<img src="${photo}" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;border:1.5px solid var(--brass);">` : `<div style="width:56px;height:56px;border-radius:6px;flex-shrink:0;background:var(--navy-2);border:1.5px solid var(--line);"></div>`}
+    <p style="margin:0; font-weight:800; font-size:16px; color:var(--cream);">${escapeHtml(name)}</p>
+  `;
+  card.appendChild(header);
+
+  variants.forEach(v => {
+    const label = [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' — ') || 'Standard';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;';
+    row.innerHTML = `
+      <span style="flex:1; min-width:100px; font-weight:700; color:var(--brass-light); font-size:14px;">${escapeHtml(label)}${v.outOfStock ? ' <span style="color:#e0705a; font-size:11px;">(OUT OF STOCK)</span>' : ''}</span>
+      <span style="font-size:12px; color:#c9c9c9; font-weight:700;">Rs.</span>
+      <input type="number" class="pr-rate-input" value="${parseFloat(v.price) || 0}" style="width:64px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:6px; font-weight:800; font-size:13px;">
+      <span style="font-size:12px; color:#c9c9c9; font-weight:700;">Qty</span>
+      <input type="number" class="pr-qty-input" value="1" min="1" style="width:48px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:6px; font-weight:800; font-size:13px;">
+      <button type="button" class="pr-add-btn" style="background:var(--brass-light); color:#000; border:none; padding:7px 14px; border-radius:5px; font-weight:800; font-size:12px; cursor:pointer;">+ Add</button>
+    `;
+    const rateInput = row.querySelector('.pr-rate-input');
+    const qtyInput = row.querySelector('.pr-qty-input');
+    row.querySelector('.pr-add-btn').addEventListener('click', () => {
+      const qty = Math.max(1, parseInt(qtyInput.value, 10) || 1);
+      const rate = parseFloat(rateInput.value) || 0;
+      const sizeLabel = [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' ');
+      currentItems.push({ name, size: sizeLabel, qty, rate, photo: v.photo || photo || '' });
+      renderBillItems();
+      billStatusMsg.textContent = '1 size added to the bill — keep searching to add more items.';
+    });
+    card.appendChild(row);
+  });
+
+  return card;
+}
+
+function renderProductResults(){
+  const query = productSearch.value;
+  productResults.innerHTML = '';
+
+  if (!query.trim()){
+    return;
+  }
+  const groups = groupProductsByName(query);
+  const names = Object.keys(groups).slice(0, 15);
+  if (names.length === 0){
+    productResults.innerHTML = productsLoading
+      ? '<p style="font-family:Arial,sans-serif; color:var(--brass-light); font-size:14px;">⏳ Still loading products from your catalogues… matches will appear here automatically.</p>'
+      : '<p style="font-family:Arial,sans-serif; color:#8a8a8a; font-size:14px;">No matching products. Try Manual Entry instead.</p>';
+    return;
+  }
+  names.forEach(name => {
+    productResults.appendChild(buildProductCard(name, groups[name]));
+  });
+}
+productSearch.addEventListener('input', renderProductResults);
+
+// ---- Manual entry ----
+addManualItemBtn.addEventListener('click', () => {
+  const name = manualName.value.trim();
+  const qty = Math.max(1, parseInt(manualQty.value, 10) || 1);
+  const rate = parseFloat(manualRate.value) || 0;
+  if (!name){ alert('Please enter an item name.'); return; }
+  currentItems.push({ name, size: '', qty, rate });
+  manualName.value = '';
+  manualQty.value = 1;
+  manualRate.value = '';
+  renderBillItems();
+});
+
+// ---- Bill items list & totals ----
+function renderBillItems(){
+  billItemsList.innerHTML = '';
+  noItemsMsg.style.display = currentItems.length === 0 ? 'block' : 'none';
+
+  currentItems.forEach((item, idx) => {
+    const amount = item.qty * item.rate;
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      ${item.photo ? `<img src="${item.photo}" style="width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0;border:1.5px solid var(--brass);">` : ''}
+      <div class="info">
+        <p class="iname">${escapeHtml(item.name)}</p>
+        ${item.size ? `<p class="isize">${escapeHtml(item.size)}</p>` : ''}
+        <p style="font-family:Arial,sans-serif; font-size:14px; font-weight:700; color:var(--brass-light); margin:6px 0 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+          Rs.
+          <input type="number" class="rate-input" data-idx="${idx}" value="${item.rate}" style="width:64px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          ×
+          <input type="number" class="qty-input" data-idx="${idx}" value="${item.qty}" min="1" style="width:50px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          pcs = <span style="color:var(--cream);">${money(amount)}</span>
+        </p>
+      </div>
+      <button type="button" class="remove-item" data-idx="${idx}">✕</button>
+    `;
+    billItemsList.appendChild(row);
+  });
+
+  document.querySelectorAll('.rate-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const idx = Number(inp.getAttribute('data-idx'));
+      const val = parseFloat(inp.value) || 0;
+      currentItems[idx].rate = val;
+      renderBillItems();
+    });
+  });
+  document.querySelectorAll('.qty-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const idx = Number(inp.getAttribute('data-idx'));
+      const val = Math.max(1, parseInt(inp.value, 10) || 1);
+      currentItems[idx].qty = val;
+      renderBillItems();
+    });
+  });
+  document.querySelectorAll('.remove-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentItems.splice(Number(btn.getAttribute('data-idx')), 1);
+      renderBillItems();
+    });
+  });
+
+  updateTotals();
+}
+
+function calculatePacking(amountAfterDiscount){
+  if (amountAfterDiscount <= 8000) return 300;
+  return Math.round(amountAfterDiscount * 0.04 * 100) / 100;
+}
+
+function updateTotals(){
+  const subtotal = currentItems.reduce((sum, i) => sum + i.qty * i.rate, 0);
+  const discountPercent = parseFloat(discountPercentInput.value) || 0;
+  const discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
+  const afterDiscount = Math.max(0, subtotal - discountAmount);
+
+  const packingAuto = packingAutoInput.checked;
+  let packing;
+  if (packingAuto){
+    packing = currentItems.length > 0 ? calculatePacking(afterDiscount) : 0;
+    packingOverrideInput.value = packing;
+  } else {
+    packing = parseFloat(packingOverrideInput.value) || 0;
+  }
+  const afterPacking = afterDiscount + packing;
+
+  const gstEnabled = gstEnabledInput.checked;
+  const gstPercent = gstEnabled ? (parseFloat(gstPercentInput.value) || 0) : 0;
+  const gstAmount = gstEnabled ? Math.round(afterPacking * (gstPercent / 100) * 100) / 100 : 0;
+
+  const exactTotal = Math.round((afterPacking + gstAmount) * 100) / 100;
+  // Auto Round Off: Grand Total to the nearest rupee (50 paise and above goes up).
+  const roundOffEnabled = roundOffInput.checked;
+  const total = roundOffEnabled ? Math.round(exactTotal) : exactTotal;
+  const roundOff = Math.round((total - exactTotal) * 100) / 100;
+  if (roundOffEnabled && roundOff !== 0 && currentItems.length){
+    roundOffRow.style.display = 'flex';
+    roundOffDisplay.textContent = (roundOff > 0 ? '+ ' : '- ') + money(Math.abs(roundOff));
+  } else {
+    roundOffRow.style.display = 'none';
+  }
+
+  subtotalDisplay.textContent = money(subtotal);
+  discountLabel.textContent = 'Discount (' + discountPercent + '%)';
+  discountDisplay.textContent = '- ' + money(discountAmount);
+  packingDisplay.textContent = '+ ' + money(packing);
+
+  if (gstEnabled){
+    gstRow.style.display = 'flex';
+    gstLabel.textContent = 'GST (' + gstPercent + '%)';
+    gstDisplay.textContent = '+ ' + money(gstAmount);
+  } else {
+    gstRow.style.display = 'none';
+  }
+
+  // Transport Name is a plain reference note (e.g. courier/company name) — it's
+  // never a monetary amount and never affects the Grand Total.
+  const transportName = transportInput.value.trim();
+
+  totalDisplay.textContent = money(total);
+
+  // Advance is money already received — it never changes the Grand Total,
+  // it just shows what's still left to collect.
+  const advance = Math.max(0, Math.round((parseFloat(advanceInput.value) || 0) * 100) / 100);
+  const balance = Math.round((total - advance) * 100) / 100;
+  if (advance > 0){
+    advanceRow.style.display = 'flex';
+    balanceRow.style.display = 'flex';
+    advanceDisplay.textContent = '- ' + money(advance);
+    balanceLabel.textContent = balance < 0 ? 'Excess Paid (return)' : (balance === 0 ? 'Balance Due (fully paid)' : 'Balance Due');
+    balanceDisplay.textContent = money(Math.abs(balance));
+    balanceRow.style.color = balance > 0 ? '#e0705a' : '#7cd992';
+  } else {
+    advanceRow.style.display = 'none';
+    balanceRow.style.display = 'none';
+  }
+
+  return { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff };
+}
+advanceInput.addEventListener('input', updateTotals);
+discountPercentInput.addEventListener('input', updateTotals);
+gstPercentInput.addEventListener('input', updateTotals);
+
+// ---- Bill photo store ----
+// All bills live together under one key ("all-bills"), and every save
+// uploads that whole list. Bills used to carry full copies of each product
+// photo inside every item, so the list grew by ~100KB per item and every
+// save re-uploaded every photo of every bill ever made — that's what made
+// saving slow, and it got slower with each bill. Now each distinct photo is
+// uploaded ONCE to its own small document ("bphoto:<fingerprint>"), and
+// bill items just keep a short `photoKey` pointing at it. Bills saved the old
+// way still work as-is, and are converted automatically in the background.
+const billPhotoCache = new Map();   // photoKey -> dataUrl (this session)
+const knownPhotoKeys = new Set();   // photoKeys already saved in the cloud
+
+function photoKeyFor(dataUrl){
+  // cyrb53 fingerprint of the photo — same photo always gives the same key
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < dataUrl.length; i++){
+    const ch = dataUrl.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 'bphoto:' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + '-' + dataUrl.length.toString(36);
+}
+
+function noteKnownPhotoKeys(billList){
+  (billList || []).forEach(b => (b.items || []).forEach(i => { if (i.photoKey) knownPhotoKeys.add(i.photoKey); }));
+}
+
+// Returns copies of the bills with inline photos replaced by photoKeys,
+// uploading (in one batch) only photos the cloud doesn't have yet.
+async function stripBillPhotos(billList){
+  const toUpload = new Map();
+  const stripped = billList.map(b => {
+    if (!b.items || !b.items.some(i => i.photo && String(i.photo).startsWith('data:'))) return b;
+    return { ...b, items: b.items.map(i => {
+      if (!(i.photo && String(i.photo).startsWith('data:'))) return i;
+      const key = photoKeyFor(i.photo);
+      billPhotoCache.set(key, i.photo);
+      if (!knownPhotoKeys.has(key)) toUpload.set(key, i.photo);
+      const { photo, ...rest } = i;
+      return { ...rest, photoKey: key };
+    })};
+  });
+  if (toUpload.size){
+    await storage.setMany(Array.from(toUpload.entries()));
+    toUpload.forEach((_, key) => knownPhotoKeys.add(key));
+  }
+  return stripped;
+}
+
+async function getBillPhoto(key){
+  if (billPhotoCache.has(key)) return billPhotoCache.get(key);
+  try {
+    const r = await storage.get(key);
+    if (r && r.value){ billPhotoCache.set(key, r.value); return r.value; }
+  } catch (e) { /* photo unavailable — the bill still works without it */ }
+  return '';
+}
+
+// Copy of a bill with every item's photo filled in (for PDFs / editing).
+// Capped so a slow connection can't hold up a PDF or WhatsApp share for long.
+async function withBillPhotos(bill, timeoutMs){
+  const items = (bill.items || []).map(i => ({ ...i }));
+  const fill = Promise.all(items.map(async i => {
+    if (!i.photo && i.photoKey) i.photo = await getBillPhoto(i.photoKey);
+  }));
+  await Promise.race([fill, new Promise(r => setTimeout(r, timeoutMs || 4000))]);
+  return { ...bill, items };
+}
+
+// One-time background conversion of bills saved the old (photo-inside) way.
+let billMigrationPromise = null;
+function migrateOldBillPhotos(){
+  if (billMigrationPromise) return billMigrationPromise;
+  billMigrationPromise = (async () => {
+    try {
+      if (!bills.some(b => (b.items || []).some(i => i.photo && String(i.photo).startsWith('data:')))) return;
+      await stripBillPhotos(bills); // uploads each distinct photo once
+      // Re-strip the very latest list (another phone may have added a bill
+      // while photos uploaded) — photos are already known now, so it's instant.
+      bills = await stripBillPhotos(bills);
+      await storage.set('all-bills', JSON.stringify(bills));
+    } catch (e) {
+      console.error('Bill photo conversion will retry next time:', e);
+    } finally {
+      billMigrationPromise = null;
+    }
+  })();
+  return billMigrationPromise;
+}
+
+// ---- Save / Clear bill ----
+async function getNextInvoiceNo(){
+  try {
+    const r = await storage.get('invoice-counter');
+    return r && r.value ? parseInt(r.value, 10) : 1;
+  } catch (e) { return 1; }
+}
+
+function resetBillForm(nextInvoiceNoValue){
+  editingBillId = null;
+  currentItems = [];
+  invoiceNoInput.value = nextInvoiceNoValue;
+  billDateInput.value = todayStr();
+  customerNameInput.value = '';
+  customerPhoneInput.value = '';
+  customerAddressInput.value = '';
+  discountPercentInput.value = 50;
+  gstEnabledInput.checked = false;
+  gstPercentInput.value = 0;
+  gstPercentInput.disabled = true;
+  packingAutoInput.checked = true;
+  packingOverrideInput.value = 0;
+  packingOverrideInput.disabled = true;
+  transportInput.value = '';
+  advanceInput.value = '';
+  roundOffInput.checked = roundOffDefault;
+  productSearch.value = '';
+  manualName.value = '';
+  manualQty.value = 1;
+  manualRate.value = '';
+  billFormTitle.textContent = 'New Bill';
+  renderProductResults();
+  renderBillItems();
+}
+
+let billSaving = false;
+let lastSavedMadeBy = null;
+saveBillBtn.addEventListener('click', async () => {
+  if (billSaving) return; // ignore double-taps while a save is in progress
+  if (currentItems.length === 0){ alert('Please add at least one item to the bill.'); return; }
+  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff } = updateTotals();
+  const prevBill = editingBillId ? (bills.find(b => b.id === editingBillId) || {}) : {};
+
+  const bill = {
+    id: editingBillId || Date.now(),
+    invoiceNo: parseInt(invoiceNoInput.value, 10) || 1,
+    date: billDateInput.value || todayStr(),
+    customerName: customerNameInput.value.trim(),
+    customerPhone: customerPhoneInput.value.trim(),
+    customerAddress: customerAddressInput.value.trim(),
+    billMadeBy: billMadeByInput.value.trim(),
+    items: currentItems.slice(),
+    subtotal,
+    discountPercent,
+    discountAmount,
+    packingAuto,
+    packing,
+    gstEnabled,
+    gstPercent,
+    gstAmount,
+    transportName,
+    total,
+    roundOffEnabled,
+    roundOff,
+    advance,
+    balance,
+    // A bill whose advance covers the full total is marked Paid automatically.
+    paid: !!prevBill.paid || (advance > 0 && balance <= 0),
+    dispatched: !!prevBill.dispatched
+  };
+
+  billSaving = true;
+  const originalBtnText = saveBillBtn.textContent;
+  saveBillBtn.disabled = true;
+  saveBillBtn.textContent = '⏳ Saving...';
+  billStatusMsg.textContent = 'Saving bill...';
+  try {
+    if (billMigrationPromise) await billMigrationPromise;
+    // Read the invoice counter at the same time as photos upload.
+    const counterPromise = getNextInvoiceNo();
+
+    // Work on a copy — `bills` is only replaced once the save succeeds, so
+    // a failed save can be retried without losing or duplicating the bill.
+    let newBills = bills.slice();
+    const wasEditing = !!editingBillId;
+    if (wasEditing){
+      const idx = newBills.findIndex(b => b.id === editingBillId);
+      if (idx !== -1) newBills[idx] = bill; else newBills.push(bill);
+    } else {
+      newBills.unshift(bill);
+    }
+    newBills = await stripBillPhotos(newBills); // uploads only brand-new photos
+
+    const currentCounter = await counterPromise;
+    const nextNo = wasEditing ? currentCounter : Math.max(bill.invoiceNo + 1, currentCounter);
+    const writes = [storage.set('all-bills', JSON.stringify(newBills))];
+    if (!wasEditing) writes.push(storage.set('invoice-counter', String(nextNo)));
+    if (bill.billMadeBy && bill.billMadeBy !== lastSavedMadeBy) writes.push(storage.set('last-bill-made-by', bill.billMadeBy));
+    // Remember this customer in the separate customer list (a hiccup here
+    // never blocks or fails the bill save itself).
+    if (!customersLoaded) await loadSavedCustomers();
+    if (customersLoaded && upsertCustomer(savedCustomers, bill.customerName, bill.customerPhone, bill.customerAddress, Date.now())){
+      writes.push(saveCustomersToCloud().catch(e => console.error('Customer list not updated:', e)));
+    }
+    await Promise.all(writes);
+
+    bills = newBills;
+    if (bill.billMadeBy) lastSavedMadeBy = bill.billMadeBy;
+    renderBillsList();
+    resetBillForm(nextNo);
+    billStatusMsg.textContent = 'Bill saved ✓';
+  } catch (err) {
+    console.error(err);
+    billStatusMsg.textContent = '⚠️ Bill NOT saved — tap Save again.';
+    alert('The bill could not be saved. It is still on screen — tap Save Bill again to retry.');
+  } finally {
+    billSaving = false;
+    saveBillBtn.disabled = false;
+    saveBillBtn.textContent = originalBtnText;
+  }
+});
+
+clearBillBtn.addEventListener('click', async () => {
+  const nextInvoiceNoValue = await getNextInvoiceNo();
+  resetBillForm(nextInvoiceNoValue);
+});
+
+// ---- PDF export (clean, print-friendly layout) ----
+function generateBillPDF(bill){
+  const doc = buildBillPDFDoc(bill);
+  const safeName = ('invoice-' + bill.invoiceNo + (bill.customerName ? '-' + bill.customerName : '')).replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+  doc.save(safeName + '.pdf');
+}
+
+async function shareBillPDFViaWhatsApp(bill){
+  const doc = buildBillPDFDoc(bill);
+  const safeName = ('invoice-' + bill.invoiceNo + (bill.customerName ? '-' + bill.customerName : '')).replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+  const fileName = safeName + '.pdf';
+
+  try {
+    const blob = doc.output('blob');
+    const file = new File([blob], fileName, { type: 'application/pdf' });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })){
+      await navigator.share({
+        files: [file],
+        title: fileName,
+        text: 'Order Estimate #' + bill.invoiceNo + (shopSettings.name ? ' — ' + shopSettings.name : '')
+      });
+      billStatusMsg.textContent = 'Share sheet opened — pick WhatsApp or WhatsApp Business.';
+    } else {
+      doc.save(fileName);
+      alert('Your browser can\'t open the share sheet directly, so the PDF has been downloaded instead. Please attach it manually in WhatsApp.');
+    }
+  } catch (err) {
+    // AbortError just means the user cancelled the share sheet — not a real error
+    if (err && err.name === 'AbortError') return;
+    console.error(err);
+    doc.save(fileName);
+    alert('Could not open the share sheet, so the PDF has been downloaded instead. Please attach it manually in WhatsApp.');
+  }
+}
+
+function buildBillPDFDoc(bill){
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageWidth = 210;
+  let y = 20;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(20,20,20);
+  doc.text(shopSettings.name || 'Order Estimate', pageWidth/2, y, { align: 'center' });
+  y += 7;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(90,90,90);
+  const shopLine = [shopSettings.address, shopSettings.phone].filter(Boolean).join('   |   ');
+  if (shopLine){ doc.text(shopLine, pageWidth/2, y, { align: 'center' }); y += 6; }
+
+  y += 4;
+  doc.setDrawColor(180,145,47);
+  doc.setLineWidth(0.6);
+  doc.line(15, y, pageWidth-15, y);
+  y += 10;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.setTextColor(20,20,20);
+  doc.text('Order Estimate #' + bill.invoiceNo, 15, y);
+  doc.text('Date: ' + formatDateDMY(bill.date), pageWidth-15, y, { align: 'right' });
+  y += 8;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  if (bill.customerName){ doc.text('Bill To: ' + bill.customerName, 15, y); }
+  if (bill.billMadeBy){ doc.text('Prepared By: ' + bill.billMadeBy, pageWidth-15, y, { align: 'right' }); }
+  if (bill.customerName || bill.billMadeBy) y += 6;
+  if (bill.customerPhone){ doc.text('Phone: ' + bill.customerPhone, 15, y); y += 6; }
+  if (bill.customerAddress){
+    const addrLines = doc.splitTextToSize('Address: ' + bill.customerAddress, pageWidth - 30);
+    doc.text(addrLines, 15, y);
+    y += addrLines.length * 5.5;
+  }
+  if (bill.transportName){ doc.text('Transport: ' + bill.transportName, 15, y); y += 6; }
+  y += 4;
+
+  // Table header (drawn as its own function so it can repeat on new pages)
+  const rowH = 24;
+  const pageHeight = 297;
+  const bottomLimit = 278;
+
+  function drawTableHeader(yPos){
+    doc.setFillColor(20,20,20);
+    doc.rect(15, yPos, pageWidth-30, 9, 'F');
+    doc.setTextColor(240,195,65);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text('PHOTO', 18, yPos+6);
+    doc.text('ITEM', 42, yPos+6);
+    doc.text('SIZE', 108, yPos+6);
+    doc.text('QTY', 138, yPos+6);
+    doc.text('RATE', 158, yPos+6);
+    doc.text('AMOUNT', pageWidth-18, yPos+6, { align: 'right' });
+    return yPos + 9;
+  }
+
+  y = drawTableHeader(y);
+
+  doc.setTextColor(20,20,20);
+  doc.setFont('helvetica', 'normal');
+  bill.items.forEach((item, idx) => {
+    if (y + rowH > bottomLimit){
+      doc.addPage();
+      y = 20;
+      y = drawTableHeader(y);
+      doc.setTextColor(20,20,20);
+      doc.setFont('helvetica', 'normal');
+    }
+
+    if (idx % 2 === 1){
+      doc.setFillColor(245,245,245);
+      doc.rect(15, y, pageWidth-30, rowH, 'F');
+    }
+    const amount = item.qty * item.rate;
+
+    if (item.photo){
+      try { doc.addImage(item.photo, 'JPEG', 17, y+2, 20, 20); } catch (e) { /* skip if image can't be embedded */ }
+    } else {
+      doc.setDrawColor(210,210,210);
+      doc.rect(17, y+2, 20, 20);
+    }
+
+    doc.setFontSize(10);
+    // Cap every column's text to the space actually available before the
+    // next column starts, so a long product name or size label wraps
+    // instead of running into the numbers beside it.
+    const nameLines = doc.splitTextToSize(item.name, 60).slice(0, 2);
+    doc.text(nameLines, 42, y+9);
+    const sizeLines = doc.splitTextToSize(String(item.size || '-'), 26).slice(0, 2);
+    doc.text(sizeLines, 108, y+11);
+    doc.text(String(item.qty), 138, y+14);
+    doc.text(String(item.rate), 158, y+14);
+    doc.text(String(Math.round(amount*100)/100), pageWidth-18, y+14, { align: 'right' });
+
+    y += rowH;
+  });
+
+  // Make sure the totals block + verification notice have room; if not, start a fresh page
+  const pdfAdvance = parseFloat(bill.advance) || 0;
+  const pdfRoundOff = parseFloat(bill.roundOff) || 0;
+  if (y + 105 + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) > bottomLimit){
+    doc.addPage();
+    y = 20;
+  }
+
+  y += 4;
+  doc.setDrawColor(200,200,200);
+  doc.line(120, y, pageWidth-15, y);
+  y += 7;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  doc.text('Subtotal:', 130, y);
+  doc.text(String(Math.round(bill.subtotal*100)/100), pageWidth-18, y, { align: 'right' });
+  y += 6;
+
+  doc.text('Discount (' + bill.discountPercent + '%):', 130, y);
+  doc.text('- ' + String(Math.round(bill.discountAmount*100)/100), pageWidth-18, y, { align: 'right' });
+  y += 6;
+
+  doc.text('Packing:', 130, y);
+  doc.text('+ ' + String(Math.round(bill.packing*100)/100), pageWidth-18, y, { align: 'right' });
+  y += 6;
+
+  if (bill.gstEnabled){
+    doc.text('GST (' + bill.gstPercent + '%):', 130, y);
+    doc.text('+ ' + String(Math.round(bill.gstAmount*100)/100), pageWidth-18, y, { align: 'right' });
+    y += 6;
+  }
+
+  if (pdfRoundOff){
+    doc.text('Round Off:', 130, y);
+    doc.text((pdfRoundOff > 0 ? '+ ' : '- ') + Math.abs(pdfRoundOff).toFixed(2), pageWidth-18, y, { align: 'right' });
+    y += 6;
+  }
+
+  y += 2;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.text('Grand Total:', 130, y);
+  doc.text('Rs. ' + String(Math.round(bill.total*100)/100), pageWidth-18, y, { align: 'right' });
+
+  if (pdfAdvance > 0){
+    const pdfBalance = Math.round((bill.total - pdfAdvance) * 100) / 100;
+    y += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.text('Advance Received:', 130, y);
+    doc.text('- ' + String(Math.round(pdfAdvance*100)/100), pageWidth-18, y, { align: 'right' });
+    y += 7;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    if (pdfBalance > 0) doc.setTextColor(179,70,44); else doc.setTextColor(30,130,60);
+    doc.text(pdfBalance < 0 ? 'Excess Paid:' : 'Balance Due:', 130, y);
+    doc.text('Rs. ' + String(Math.abs(pdfBalance)), pageWidth-18, y, { align: 'right' });
+    doc.setTextColor(0,0,0);
+  }
+
+  y += 14;
+  doc.setDrawColor(180,145,47);
+  doc.setLineWidth(0.4);
+  doc.rect(15, y, pageWidth-30, 20);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(140,95,20);
+  doc.text('Bill Verification Notice:', 18, y+5.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(70,70,70);
+  const noticeText = 'Customers are requested to check all bill details carefully before confirmation. Once confirmed, we will not be responsible for any errors or discrepancies in the bill.';
+  const noticeLines = doc.splitTextToSize(noticeText, pageWidth-40);
+  doc.text(noticeLines, 18, y+11);
+
+  y += 24;
+  doc.setDrawColor(180,145,47);
+  doc.setLineWidth(0.4);
+  doc.rect(15, y, pageWidth-30, 14);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(140,95,20);
+  const transportNote = 'Transportation/freight charges are not included in this bill and will be charged separately.';
+  const transportLines = doc.splitTextToSize(transportNote, pageWidth-40);
+  doc.text(transportLines, 18, y+6);
+
+  y += 22;
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(10);
+  doc.setTextColor(120,120,120);
+  doc.text('Thank you for your business!', pageWidth/2, y, { align: 'center' });
+
+  return doc;
+}
+
+function buildCurrentDraftBill(){
+  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff } = updateTotals();
+  return {
+    advance, balance, roundOffEnabled, roundOff,
+    invoiceNo: parseInt(invoiceNoInput.value, 10) || 1,
+    date: billDateInput.value || todayStr(),
+    customerName: customerNameInput.value.trim(),
+    customerPhone: customerPhoneInput.value.trim(),
+    customerAddress: customerAddressInput.value.trim(),
+    billMadeBy: billMadeByInput.value.trim(),
+    items: currentItems.slice(),
+    subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total
+  };
+}
+
+exportCurrentPdfBtn.addEventListener('click', async () => {
+  if (currentItems.length === 0){ alert('Please add at least one item first.'); return; }
+  generateBillPDF(await withBillPhotos(buildCurrentDraftBill()));
+});
+
+// ---- Send estimate straight to the customer's own WhatsApp chat ----
+// WhatsApp doesn't let a web page attach a file and send it to a number on
+// its own, but it does let us open that number's chat with a message already
+// typed — so the whole estimate goes as text and you just tap Send.
+function toWhatsAppNumber(raw){
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  if (d.length === 10) d = '91' + d; // Indian mobile without country code
+  return d.length >= 11 && d.length <= 15 ? d : '';
+}
+
+function buildEstimateText(bill){
+  const r = n => money(Math.round((parseFloat(n) || 0) * 100) / 100);
+  const lines = [];
+  if (shopSettings.name) lines.push('*' + shopSettings.name + '*');
+  lines.push('*Order Estimate #' + bill.invoiceNo + '*  (' + formatDateDMY(bill.date) + ')');
+  if (bill.customerName) lines.push('Customer: ' + bill.customerName);
+  lines.push('');
+  (bill.items || []).forEach((it, idx) => {
+    const amt = (parseFloat(it.qty) || 0) * (parseFloat(it.rate) || 0);
+    lines.push((idx + 1) + '. ' + it.name + (it.size ? ' (' + it.size + ')' : '') + ' — ' + it.qty + ' × ' + r(it.rate) + ' = ' + r(amt));
+  });
+  lines.push('');
+  lines.push('Subtotal: ' + r(bill.subtotal));
+  if (bill.discountAmount) lines.push('Discount (' + bill.discountPercent + '%): - ' + r(bill.discountAmount));
+  if (bill.packing) lines.push('Packing: + ' + r(bill.packing));
+  if (bill.gstEnabled && bill.gstAmount) lines.push('GST (' + bill.gstPercent + '%): + ' + r(bill.gstAmount));
+  if (parseFloat(bill.roundOff)) lines.push('Round Off: ' + (bill.roundOff > 0 ? '+ ' : '- ') + r(Math.abs(bill.roundOff)));
+  lines.push('*Grand Total: ' + r(bill.total) + '*');
+  const adv = parseFloat(bill.advance) || 0;
+  if (adv > 0){
+    const bal = Math.round((bill.total - adv) * 100) / 100;
+    lines.push('Advance Received: - ' + r(adv));
+    lines.push(bal < 0 ? '*Excess Paid: ' + r(-bal) + '*' : (bal === 0 ? '*Fully Paid ✅*' : '*Balance Due: ' + r(bal) + '*'));
+  }
+  if (bill.transportName) lines.push('Transport: ' + bill.transportName);
+  lines.push('');
+  lines.push('_Transportation/freight charges are not included and will be charged separately._');
+  lines.push('_Please check all details before confirming._');
+  if (shopSettings.phone) lines.push('📞 ' + shopSettings.phone);
+  return lines.join('\n');
+}
+
+function sendEstimateToWhatsApp(bill){
+  let number = toWhatsAppNumber(bill.customerPhone);
+  if (!number){
+    const typed = prompt('Customer\'s WhatsApp number (10-digit mobile, or with country code):', bill.customerPhone || '');
+    if (typed === null) return; // cancelled
+    number = toWhatsAppNumber(typed);
+    if (!number){ alert('That doesn\'t look like a valid phone number. Please check and try again.'); return; }
+    // If this is the bill on screen, fill the number into the form too, so
+    // it's saved with the bill (never touches the form for a history bill).
+    const isOnScreen = !bill.id || bill.id === editingBillId;
+    if (isOnScreen && !customerPhoneInput.value.trim()) customerPhoneInput.value = typed.trim();
+  }
+  const url = 'https://wa.me/' + number + '?text=' + encodeURIComponent(buildEstimateText(bill));
+  // Opens in a new tab / the WhatsApp app, so the bill stays open in the app
+  // behind it (navigating this page away would lose an unsaved bill).
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  billStatusMsg.textContent = 'WhatsApp opened for +' + number + ' — just tap Send.';
+}
+
+const waDirectCurrentBtn = document.getElementById('wa-direct-current-btn');
+waDirectCurrentBtn.addEventListener('click', () => {
+  if (currentItems.length === 0){ alert('Please add at least one item first.'); return; }
+  sendEstimateToWhatsApp(buildCurrentDraftBill());
+});
+
+const shareCurrentPdfBtn = document.getElementById('share-current-pdf-btn');
+shareCurrentPdfBtn.addEventListener('click', async () => {
+  if (currentItems.length === 0){ alert('Please add at least one item first.'); return; }
+  shareBillPDFViaWhatsApp(await withBillPhotos(buildCurrentDraftBill(), 2500));
+});
+
+// ---- Bill history ----
+async function loadBills(){
+  try {
+    const r = await storage.get('all-bills');
+    bills = r && r.value ? JSON.parse(r.value) : [];
+    billsLoadOk = true;
+  } catch (e) { bills = []; }
+  noteKnownPhotoKeys(bills);
+  renderBillsList();
+  prefetchRecentBillPhotos();
+}
+
+// Quietly pre-load photos of the most recent bills so their PDF / WhatsApp
+// buttons are instant.
+function prefetchRecentBillPhotos(){
+  const keys = new Set();
+  bills.slice(0, 15).forEach(b => (b.items || []).forEach(i => { if (i.photoKey && !billPhotoCache.has(i.photoKey)) keys.add(i.photoKey); }));
+  keys.forEach(k => { getBillPhoto(k); });
+}
+
+// ---- Live sync: when another phone saves/edits/deletes a bill, this phone's
+// Bill History refreshes automatically, no manual refresh needed. ----
+let billsUnsub = null;
+function attachBillsListener(){
+  if (billsUnsub) billsUnsub();
+  billsUnsub = storage.onChange('all-bills', (value) => {
+    bills = value ? JSON.parse(value) : [];
+    noteKnownPhotoKeys(bills);
+    renderBillsList();
+  });
+}
+
+// ---- Saved customers (name/phone/address) ----
+// Customers are kept in their OWN list ("saved-customers"), separate from
+// bills. They used to be worked out from the bill list, so deleting a bill
+// also made its customer disappear. Now deleting a bill never touches the
+// customer — a customer is only removed if you remove them yourself (✕).
+const CUSTOMERS_KEY = 'saved-customers';
+let savedCustomers = []; // [{name, phone, address, updatedAt}]
+let customersLoaded = false; // never write the list unless it loaded properly first
+let billsLoadOk = false;
+
+function customerKeyOf(name, phone){
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length >= 10) return 'p:' + digits.slice(-10); // same mobile, any format
+  if (digits) return 'p:' + digits;
+  return 'n:' + String(name || '').trim().toLowerCase();
+}
+
+// Adds or updates a customer in the list (newer details win, but an empty
+// field never wipes out a previously saved one).
+function upsertCustomer(list, name, phone, address, updatedAt){
+  name = (name || '').trim(); phone = (phone || '').trim(); address = (address || '').trim();
+  if (!name && !phone) return false;
+  const key = customerKeyOf(name, phone);
+  const idx = list.findIndex(c => customerKeyOf(c.name, c.phone) === key);
+  if (idx === -1){
+    list.push({ name, phone, address, updatedAt });
+    return true;
+  }
+  const c = list[idx];
+  const newer = updatedAt >= (c.updatedAt || 0);
+  list[idx] = {
+    name: (newer ? name || c.name : c.name || name),
+    phone: (newer ? phone || c.phone : c.phone || phone),
+    address: (newer ? address || c.address : c.address || address),
+    updatedAt: Math.max(updatedAt, c.updatedAt || 0)
+  };
+  return true;
+}
+
+async function saveCustomersToCloud(){
+  await storage.set(CUSTOMERS_KEY, JSON.stringify({ v: 1, customers: savedCustomers }));
+}
+
+async function loadSavedCustomers(){
+  let r = null;
+  try { r = await storage.get(CUSTOMERS_KEY); }
+  catch (e) { console.error('Could not load saved customers:', e); return; }
+  if (r && r.value){
+    try { savedCustomers = (JSON.parse(r.value).customers) || []; }
+    catch (e) { console.error('Customer list unreadable — leaving it untouched:', e); return; }
+    customersLoaded = true;
+    return;
+  }
+  // First time on this version: copy every customer from existing bills
+  // into the new list (oldest bill first, so the latest details win).
+  if (!billsLoadOk) return; // bills didn't load — don't build the list from nothing
+  const list = [];
+  bills.slice().reverse().forEach(b => upsertCustomer(list, b.customerName, b.customerPhone, b.customerAddress, b.id || 0));
+  savedCustomers = list;
+  customersLoaded = true;
+  if (list.length){
+    try { await saveCustomersToCloud(); } catch (e) { console.error('Could not save customer list:', e); }
+  }
+}
+
+let customersUnsub = null;
+function attachCustomersListener(){
+  if (customersUnsub) customersUnsub();
+  customersUnsub = storage.onChange(CUSTOMERS_KEY, (value) => {
+    if (!value) return;
+    try { savedCustomers = JSON.parse(value).customers || []; } catch (e) { return; }
+    if (customerPickerSearch.value.trim()) renderCustomerPickerResults();
+  });
+}
+
+function getSavedCustomers(){
+  return savedCustomers.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)); // most recent first
+}
+
+function renderCustomerPickerResults(){
+  const query = customerPickerSearch.value.trim().toLowerCase();
+  customerPickerResults.innerHTML = '';
+  if (!query){ return; }
+  const matches = getSavedCustomers().filter(c =>
+    c.name.toLowerCase().includes(query) || c.phone.toLowerCase().includes(query)
+  ).slice(0, 8);
+
+  if (matches.length === 0){
+    const div = document.createElement('div');
+    div.style.cssText = 'font-family:Arial,sans-serif; font-size:13px; color:#8a8a8a; padding:6px 2px;';
+    div.textContent = 'No matching saved customer.';
+    customerPickerResults.appendChild(div);
+    return;
+  }
+
+  matches.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'product-result';
+    div.style.position = 'relative';
+    div.innerHTML = `
+      <div class="pname" style="padding-right:34px;">${escapeHtml(c.name || 'Unnamed customer')}</div>
+      <div class="psizes" style="padding-right:34px;">${c.phone ? '📞 ' + escapeHtml(c.phone) : 'No phone saved'}${c.address ? ' — ' + escapeHtml(c.address) : ''}</div>
+      <button type="button" class="remove-customer-btn" title="Remove from saved customers" style="position:absolute; top:50%; right:6px; transform:translateY(-50%); background:none; border:none; color:#e0705a; font-size:18px; cursor:pointer; padding:4px 8px;">✕</button>
+    `;
+    div.querySelector('.remove-customer-btn').addEventListener('click', async (e) => {
+      e.stopPropagation(); // don't also load this customer into the bill
+      if (!confirm('Remove ' + (c.name || c.phone || 'this customer') + ' from saved customers?\n\nTheir existing bills are NOT affected.')) return;
+      const key = customerKeyOf(c.name, c.phone);
+      savedCustomers = savedCustomers.filter(x => customerKeyOf(x.name, x.phone) !== key);
+      renderCustomerPickerResults();
+      try { await saveCustomersToCloud(); }
+      catch (err) { console.error(err); alert('Could not remove the customer — please try again.'); }
+    });
+    div.addEventListener('click', () => {
+      customerNameInput.value = c.name;
+      customerPhoneInput.value = c.phone;
+      customerAddressInput.value = c.address;
+      customerPickerSearch.value = '';
+      customerPickerResults.innerHTML = '';
+      billStatusMsg.textContent = 'Loaded saved details for ' + (c.name || 'this customer') + '.';
+    });
+    customerPickerResults.appendChild(div);
+  });
+}
+customerPickerSearch.addEventListener('input', renderCustomerPickerResults);
+
+// Live sync: when another phone saves/edits/deletes a bill, this phone's
+// Bill History refreshes automatically, no manual refresh needed.
+function renderBillsList(){
+  const query = billSearch.value.trim().toLowerCase();
+  let filtered = query
+    ? bills.filter(b => String(b.invoiceNo).includes(query) || (b.customerName || '').toLowerCase().includes(query) || (b.customerPhone || '').toLowerCase().includes(query))
+    : bills;
+
+  if (billStatusFilter === 'paid') filtered = filtered.filter(b => b.paid);
+  else if (billStatusFilter === 'due') filtered = filtered.filter(b => !b.paid);
+  else if (billStatusFilter === 'dispatched') filtered = filtered.filter(b => b.dispatched);
+  else if (billStatusFilter === 'notdispatched') filtered = filtered.filter(b => !b.dispatched);
+
+  billsList.innerHTML = '';
+  emptyBills.style.display = filtered.length === 0 ? 'block' : 'none';
+
+  filtered.forEach(bill => {
+    const div = document.createElement('div');
+    div.className = 'bill-card';
+    div.innerHTML = `
+      <div class="top">
+        <span class="inv">#${bill.invoiceNo} ${bill.paid ? '<span class="status-pill status-paid">PAID</span>' : '<span class="status-pill status-due">DUE</span>'}${bill.dispatched ? '<span class="status-pill status-dispatched">DISPATCHED</span>' : '<span class="status-pill status-notdispatched">NOT DISPATCHED</span>'}</span>
+        <span class="amt">${money(bill.total)}</span>
+      </div>
+      <div class="meta">${escapeHtml(bill.customerName || 'Walk-in customer')} — ${bill.items.length} item(s)</div>
+      ${(parseFloat(bill.advance) || 0) > 0 ? (() => {
+        const bal = Math.round((bill.total - bill.advance) * 100) / 100;
+        return `<div class="meta" style="margin-top:2px;">Advance: ${money(bill.advance)} · <span style="font-weight:800; color:${bal > 0 ? '#e0705a' : '#7cd992'};">${bal < 0 ? 'Excess paid: ' + money(-bal) : (bal === 0 ? 'Fully paid' : 'Balance: ' + money(bal))}</span></div>`;
+      })() : ''}
+      <div class="phone">📅 ${escapeHtml(formatDateDMY(bill.date))}</div>
+      ${bill.customerPhone ? `<div class="phone">📞 ${escapeHtml(bill.customerPhone)}</div>` : ''}
+      <div class="actions">
+        <button type="button" class="btn btn-outline-line toggle-paid-btn" data-id="${bill.id}">${bill.paid ? 'Mark Due' : 'Mark Paid'}</button>
+        <button type="button" class="btn btn-outline-line toggle-dispatched-btn" data-id="${bill.id}">${bill.dispatched ? 'Mark Not Dispatched' : 'Mark Dispatched'}</button>
+        <button type="button" class="btn btn-outline edit-bill-btn" data-id="${bill.id}">Edit</button>
+        <button type="button" class="btn btn-outline pdf-bill-btn" data-id="${bill.id}">PDF</button>
+        <button type="button" class="btn wa-direct-bill-btn" data-id="${bill.id}" title="Send estimate to this customer's WhatsApp" style="background:#25d366; color:#000; border:none; flex:0.7;">💬</button>
+        <button type="button" class="btn share-bill-btn" data-id="${bill.id}" title="Send PDF via WhatsApp" style="background:none; color:#25d366; border:1.5px solid #25d366; flex:0.7;">📤</button>
+        <button type="button" class="btn btn-danger delete-bill-btn" data-id="${bill.id}" title="Delete" style="flex:0.7;">🗑</button>
+      </div>
+    `;
+    billsList.appendChild(div);
+  });
+
+  document.querySelectorAll('.toggle-paid-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (!bill) return;
+      bill.paid = !bill.paid;
+      await storage.set('all-bills', JSON.stringify(bills));
+      renderBillsList();
+    });
+  });
+
+  document.querySelectorAll('.toggle-dispatched-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (!bill) return;
+      bill.dispatched = !bill.dispatched;
+      await storage.set('all-bills', JSON.stringify(bills));
+      renderBillsList();
+    });
+  });
+
+  document.querySelectorAll('.edit-bill-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (!bill) return;
+      editingBillId = bill.id;
+      invoiceNoInput.value = bill.invoiceNo;
+      billDateInput.value = bill.date;
+      customerNameInput.value = bill.customerName;
+      customerPhoneInput.value = bill.customerPhone;
+      customerAddressInput.value = bill.customerAddress || '';
+      billMadeByInput.value = bill.billMadeBy || '';
+      currentItems = bill.items.map(i => ({ ...i }));
+      discountPercentInput.value = (bill.discountPercent !== undefined) ? bill.discountPercent : 50;
+      gstEnabledInput.checked = !!bill.gstEnabled;
+      gstPercentInput.disabled = !bill.gstEnabled;
+      gstPercentInput.value = bill.gstPercent || 0;
+      // Preserve the exact packing that was on the original bill rather than
+      // recalculating, in case items or discount get changed during editing.
+      packingAutoInput.checked = (bill.packingAuto !== undefined) ? bill.packingAuto : false;
+      packingOverrideInput.disabled = packingAutoInput.checked;
+      packingOverrideInput.value = (bill.packing !== undefined) ? bill.packing : 0;
+      transportInput.value = bill.transportName || '';
+      advanceInput.value = bill.advance ? bill.advance : '';
+      roundOffInput.checked = !!bill.roundOffEnabled; // bills from before this option keep their exact total
+      billFormTitle.textContent = 'Editing Invoice #' + bill.invoiceNo;
+      renderBillItems();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Fill in item photos (stored separately) once they arrive.
+      withBillPhotos(bill, 15000).then(full => {
+        if (editingBillId !== bill.id) return; // moved on to another bill
+        full.items.forEach((fi, idx) => {
+          const ci = currentItems[idx];
+          if (ci && !ci.photo && fi.photo && ci.photoKey === fi.photoKey) ci.photo = fi.photo;
+        });
+        renderBillItems();
+      });
+    });
+  });
+
+  document.querySelectorAll('.pdf-bill-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (bill) generateBillPDF(await withBillPhotos(bill));
+    });
+  });
+
+  document.querySelectorAll('.wa-direct-bill-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (bill) sendEstimateToWhatsApp(bill);
+    });
+  });
+
+  document.querySelectorAll('.share-bill-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      // Short cap: the phone only allows opening the share sheet for a few
+      // seconds after a tap.
+      if (bill) shareBillPDFViaWhatsApp(await withBillPhotos(bill, 2500));
+    });
+  });
+
+  document.querySelectorAll('.delete-bill-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const bill = bills.find(b => b.id === id);
+      if (!bill) return;
+      const ok = confirm('Delete Invoice #' + bill.invoiceNo + '? This cannot be undone.');
+      if (!ok) return;
+      bills = bills.filter(b => b.id !== id);
+      await storage.set('all-bills', JSON.stringify(bills));
+      renderBillsList();
+    });
+  });
+}
+billSearch.addEventListener('input', renderBillsList);
+document.querySelectorAll('.bill-filter-chips .chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    billStatusFilter = chip.getAttribute('data-filter');
+    document.querySelectorAll('.bill-filter-chips .chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    renderBillsList();
+  });
+});
+
+// ---- Handle a product passed in directly from the catalogue view ----
+window.__loadProductIntoBilling = function(payload){
+  try {
+    const variants = (payload.variations && payload.variations.length) ? payload.variations : [{ code: '', inch: '', price: '' }];
+    variants.forEach(v => { v.photo = payload.photo || v.photo || ''; });
+    tabCatalogueBtn.click();
+    productSearch.value = payload.name;
+    productResults.innerHTML = '';
+    productResults.appendChild(buildProductCard(payload.name, variants));
+    billStatusMsg.textContent = 'Loaded "' + payload.name + '" from your catalogue — set qty and tap + Add for each size.';
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+// ---- Init ----
+async function initApp(){
+  await loadShopSettings();
+  // Remove an old, oversized product cache left in the cloud by earlier versions (no longer used).
+  ['catalogue-products', 'imported-catalogue-products'].forEach(k => storage.delete(k).catch(() => null));
+  await loadBills();
+  await loadSavedCustomers();
+  attachCustomersListener();
+  const nextInvoiceNoValue = await getNextInvoiceNo();
+  resetBillForm(nextInvoiceNoValue);
+  attachBillsListener();
+
+  try {
+    const r = await storage.get('last-bill-made-by');
+    if (r && r.value){ billMadeByInput.value = r.value; lastSavedMadeBy = r.value; }
+  } catch (e) { /* no previous value saved yet */ }
+
+  // Shrink bills saved the old way (photos inside) in the background, so
+  // every save after this is fast.
+  migrateOldBillPhotos();
+
+  // Load catalogue products in the background.
+  syncCatalogueProductsNow(false);
+}
+
+initApp();
+
+})();
+</script>
+</body>
+</html>
