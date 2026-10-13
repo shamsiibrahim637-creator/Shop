@@ -2065,7 +2065,12 @@ function buildBillPDFDoc(bill){
     doc.text(addrLines, 15, y);
     y += addrLines.length * 5.5;
   }
-  if (bill.transportName){ doc.text('Transport: ' + bill.transportName, 15, y); y += 6; }
+  if (bill.transportName){
+    doc.setFont('helvetica', 'bold');
+    doc.text('Transport: ' + bill.transportName, 15, y);
+    doc.setFont('helvetica', 'normal');
+    y += 6;
+  }
   y += 4;
 
   // Table header (drawn as its own function so it can repeat on new pages)
@@ -2132,7 +2137,7 @@ function buildBillPDFDoc(bill){
   // Make sure the totals block + verification notice have room; if not, start a fresh page
   const pdfAdvance = parseFloat(bill.advance) || 0;
   const pdfRoundOff = parseFloat(bill.roundOff) || 0;
-  if (y + 105 + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) > bottomLimit){
+  if (y + 105 + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
     doc.addPage();
     y = 20;
   }
@@ -2206,17 +2211,27 @@ function buildBillPDFDoc(bill){
   doc.text(noticeLines, 18, y+11);
 
   y += 24;
+  const hasTransport = !!(bill.transportName && String(bill.transportName).trim());
+  const transportBoxH = hasTransport ? 20 : 14;
   doc.setDrawColor(180,145,47);
   doc.setLineWidth(0.4);
-  doc.rect(15, y, pageWidth-30, 14);
+  doc.rect(15, y, pageWidth-30, transportBoxH);
+  let ty = y + 6;
+  if (hasTransport){
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(20,20,20);
+    doc.text('Transport: ' + String(bill.transportName).trim(), 18, ty);
+    ty += 6;
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
   doc.setTextColor(140,95,20);
   const transportNote = 'Transportation/freight charges are not included in this bill and will be charged separately.';
   const transportLines = doc.splitTextToSize(transportNote, pageWidth-40);
-  doc.text(transportLines, 18, y+6);
+  doc.text(transportLines, 18, ty);
 
-  y += 22;
+  y += transportBoxH + 8;
   doc.setFont('helvetica', 'italic');
   doc.setFontSize(10);
   doc.setTextColor(120,120,120);
