@@ -2237,6 +2237,17 @@ function buildBillPDFDoc(bill){
   doc.setTextColor(120,120,120);
   doc.text('Thank you for your business!', pageWidth/2, y, { align: 'center' });
 
+  // Page numbers at the bottom of every page: "Page 1 of 2"
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++){
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(120,120,120);
+    doc.text('Page ' + i + ' of ' + totalPages, pageWidth/2, 290, { align: 'center' });
+  }
+  doc.setPage(totalPages);
+
   return doc;
 }
 
