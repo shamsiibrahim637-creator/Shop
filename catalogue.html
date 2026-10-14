@@ -1578,6 +1578,167 @@ async function convertOtherCatalogues(){
   }
 }
 
+// ---- 📣 Advertising image: product photo + model + sizes/MRP + "X% OFF ON MRP" ----
+let adShopInfo = null; // shop name / phone from the Billing app's settings (read once)
+async function getAdShopInfo(){
+  if (adShopInfo) return adShopInfo;
+  adShopInfo = { name: '', phone: '' };
+  try {
+    const r = await Promise.race([makeFirestoreStorage('billing_kv').get('shop-settings'), new Promise(res => setTimeout(() => res(null), 4000))]);
+    if (r && r.value){ const st = JSON.parse(r.value); adShopInfo = { name: (st.name || '').trim(), phone: (st.phone || '').trim() }; }
+  } catch (e) { console.warn('Shop details not loaded for ad image:', e); }
+  return adShopInfo;
+}
+function adLoadImage(src){
+  return new Promise((resolve) => {
+    if (!src){ resolve(null); return; }
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+}
+function adRoundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function adFitText(ctx, text, maxW, size, weight){
+  let s = size;
+  do { ctx.font = weight + ' ' + s + 'px Arial, sans-serif'; if (ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 18);
+  return s;
+}
+async function buildAdImage(item, pct, shop){
+  const W = 1080, H = 1350;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const GOLD = '#f0c43f', DARK = '#0d0d0d';
+  // background
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#1b1b1b'); g.addColorStop(1, '#050505');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = GOLD; ctx.lineWidth = 6; ctx.strokeRect(18, 18, W - 36, H - 36);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // shop name
+  let top = 60;
+  if (shop.name){
+    ctx.fillStyle = GOLD; adFitText(ctx, shop.name.toUpperCase(), W - 140, 54, 'bold');
+    ctx.fillText(shop.name.toUpperCase(), W / 2, top + 30); top += 80;
+  } else top += 10;
+  // layout: work out the space from the bottom up so nothing overlaps
+  const variations = (item.variations || []).filter(v => !v.outOfStock && (v.code || v.inch || v.price));
+  const shown = variations.slice(0, 6);
+  const ROW = 58;
+  const barH = 120, phoneH = shop.phone ? 58 : 0;
+  const barY = H - 24 - phoneH - barH;
+  const below = 24 + 70 + (shown.length ? 52 + shown.length * ROW : 0) + (variations.length > 6 ? 40 : 0) + 16;
+  const px = 70, pw = W - 140, py = top;
+  const photoH = Math.max(380, Math.min(780, barY - below - py));
+  ctx.save(); adRoundRect(ctx, px, py, pw, photoH, 24); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.clip();
+  const im = await adLoadImage(await fetchFullPhoto(currentCatalogueId, item));
+  if (im){
+    const sc = Math.min((pw - 40) / im.naturalWidth, (photoH - 40) / im.naturalHeight);
+    const iw = im.naturalWidth * sc, ih = im.naturalHeight * sc;
+    ctx.drawImage(im, px + (pw - iw) / 2, py + (photoH - ih) / 2, iw, ih);
+  }
+  ctx.restore();
+  // offer badge (top-right corner of the photo)
+  const br = 104, bx = px + pw - br + 18, by = py + br - 18;
+  ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fillStyle = '#d32f2f'; ctx.fill();
+  ctx.lineWidth = 8; ctx.strokeStyle = GOLD; ctx.stroke();
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 72px Arial, sans-serif'; ctx.fillText(pct + '%', bx, by - 22);
+  ctx.font = 'bold 38px Arial, sans-serif'; ctx.fillText('OFF', bx, by + 30);
+  ctx.font = 'bold 22px Arial, sans-serif'; ctx.fillText('ON MRP', bx, by + 64);
+  // model name
+  let y = py + photoH + 24 + 35;
+  ctx.fillStyle = '#ffffff'; adFitText(ctx, item.name, W - 140, 60, 'bold');
+  ctx.fillText(item.name, W / 2, y); y += 35;
+  // sizes + MRP (three centred columns)
+  const colX = [W * 0.24, W * 0.5, W * 0.76];
+  if (shown.length){
+    y += 26;
+    ctx.font = 'bold 26px Arial, sans-serif'; ctx.fillStyle = '#a8a8a8';
+    ['SIZE', 'HEIGHT', 'MRP'].forEach((t, k) => ctx.fillText(t, colX[k], y));
+    y += 22;
+    ctx.strokeStyle = 'rgba(240,196,63,0.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(120, y); ctx.lineTo(W - 120, y); ctx.stroke();
+    y += ROW / 2 + 4;
+    shown.forEach(v => {
+      ctx.font = 'bold 42px Arial, sans-serif';
+      ctx.fillStyle = GOLD; ctx.fillText(v.code || '-', colX[0], y);
+      ctx.fillStyle = '#ffffff'; ctx.fillText(v.inch ? v.inch + '"' : '-', colX[1], y);
+      ctx.fillText(v.price ? '₹' + v.price : '-', colX[2], y);
+      y += ROW;
+    });
+    if (variations.length > 6){ ctx.font = 'bold 28px Arial, sans-serif'; ctx.fillStyle = '#a8a8a8'; ctx.fillText('+ ' + (variations.length - 6) + ' more sizes', W / 2, y - 12); }
+  }
+  // bottom offer bar
+  ctx.fillStyle = GOLD; ctx.fillRect(18, barY, W - 36, barH);
+  ctx.fillStyle = DARK; const offerText = 'FLAT ' + pct + '% OFF ON MRP';
+  adFitText(ctx, offerText, W - 120, 66, 'bold'); ctx.fillText(offerText, W / 2, barY + barH / 2);
+  if (shop.phone){ ctx.fillStyle = '#ffffff'; ctx.font = 'bold 34px Arial, sans-serif'; ctx.fillText('Call / WhatsApp: ' + shop.phone, W / 2, barY + barH + phoneH / 2); }
+  return c;
+}
+let adModal = null;
+function openAdMaker(item){
+  if (!adModal){
+    adModal = document.createElement('div');
+    adModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); display:flex; flex-direction:column; align-items:center; overflow:auto; padding:14px; font-family:Arial,sans-serif;';
+    adModal.innerHTML = `
+      <div style="width:100%; max-width:480px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#f2f2f2; font-weight:800; font-size:15px;">
+          <span style="flex:1;">📣 Ad Image</span>
+          <label style="font-size:13px; color:#c9c9c9;">Offer:</label>
+          <input type="number" class="ad-pct" min="1" max="99" inputmode="numeric" style="width:64px; text-align:center; padding:7px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:15px;">
+          <span style="color:#c9c9c9; font-size:13px;">% OFF</span>
+        </div>
+        <div class="ad-status" style="color:#f0c43f; font-weight:700; font-size:13px; margin-bottom:8px;"></div>
+        <img class="ad-preview" style="width:100%; border-radius:8px; display:block; background:#111; min-height:200px;">
+        <div style="display:flex; gap:8px; margin-top:12px;">
+          <button type="button" class="ad-share" style="flex:1; padding:13px; border:none; border-radius:8px; background:#25d366; color:#000; font-weight:800; font-size:15px;">📤 Share</button>
+          <button type="button" class="ad-download" style="flex:1; padding:13px; border:none; border-radius:8px; background:#f0c43f; color:#000; font-weight:800; font-size:15px;">⬇ Download</button>
+        </div>
+        <button type="button" class="ad-close" style="width:100%; margin-top:8px; padding:12px; border:1.5px solid #555; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:14px;">Close</button>
+      </div>`;
+    document.body.appendChild(adModal);
+    adModal.querySelector('.ad-close').addEventListener('click', () => { adModal.style.display = 'none'; document.body.style.overflow = ''; });
+  }
+  const pctInput = adModal.querySelector('.ad-pct');
+  const preview = adModal.querySelector('.ad-preview');
+  const status = adModal.querySelector('.ad-status');
+  let saved = 50; try { saved = parseInt(localStorage.getItem('shopapp-ad-offer'), 10) || 50; } catch (e) {}
+  pctInput.value = saved;
+  adModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
+  let blob = null, runId = 0;
+  const fileName = (item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-offer.jpg';
+  async function render(){
+    const my = ++runId;
+    const pct = Math.min(99, Math.max(1, parseInt(pctInput.value, 10) || 50));
+    try { localStorage.setItem('shopapp-ad-offer', String(pct)); } catch (e) {}
+    status.textContent = '⏳ Making image...'; blob = null;
+    const canvas = await buildAdImage(item, pct, await getAdShopInfo());
+    if (my !== runId) return;
+    blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+    if (my !== runId) return;
+    preview.src = URL.createObjectURL(blob);
+    status.textContent = '';
+  }
+  pctInput.onchange = render;
+  adModal.querySelector('.ad-download').onclick = () => {
+    if (!blob) return;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  adModal.querySelector('.ad-share').onclick = async () => {
+    if (!blob) return;
+    const file = new File([blob], fileName, { type: 'image/jpeg' });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: item.name }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    adModal.querySelector('.ad-download').onclick();
+    alert('Sharing is not available here, so the image was downloaded. Send it from your Gallery/Downloads.');
+  };
+  render();
+}
+
 async function loadItemsFromStorage(silent){
   const seq = ++loadSeq;
   const catId = currentCatalogueId;
@@ -2521,6 +2682,9 @@ function renderGrid(){
         <div class="row">
           <button class="stock-toggle-btn" data-id="${item.id}" style="font-size:13px; color:${item.outOfStock ? '#7cd992' : '#e0705a'};">${item.outOfStock ? '✅ Restock' : '🚫 Out of Stock'}</button>
         </div>
+        <div class="row">
+          <button class="ad-image-btn" data-id="${item.id}" style="font-size:13px; color:var(--brass-light);">📣 Make Ad Image</button>
+        </div>
       </div>
     `;
     grid.appendChild(card);
@@ -2550,6 +2714,14 @@ function renderGrid(){
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+    });
+  });
+
+  __viewRoot.querySelectorAll('.ad-image-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const item = items.find(i => i.id === id);
+      if (item) openAdMaker(item);
     });
   });
 
