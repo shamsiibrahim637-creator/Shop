@@ -1677,6 +1677,241 @@ async function buildAdImage(item, pct, shop){
   if (shop.phone){ ctx.fillStyle = '#ffffff'; ctx.font = 'bold 34px Arial, sans-serif'; ctx.fillText('Call / WhatsApp: ' + shop.phone, W / 2, barY + barH + phoneH / 2); }
   return c;
 }
+// ---- Premium ad design (dark & gold, cut-out product, offer badge, info boxes) ----
+function adSeededRandom(seed){ let x = (Number(seed) || 1) % 2147483647; if (x <= 0) x += 2147483646; return () => (x = x * 16807 % 2147483647) / 2147483647; }
+function adGoldGradient(ctx, y0, y1){
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, '#fff6c2'); g.addColorStop(0.35, '#f5cf55'); g.addColorStop(0.6, '#c9971f'); g.addColorStop(1, '#ffe38a');
+  return g;
+}
+// Removes a plain (white / single-colour) photo background so the product
+// stands on the ad. Returns null when the background isn't plain enough.
+function adCutout(im){
+  const maxSide = 900;
+  const sc = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * sc)), h = Math.max(1, Math.round(im.naturalHeight * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.drawImage(im, 0, 0, w, h);
+  let data;
+  try { data = ctx.getImageData(0, 0, w, h); } catch (e) { return null; }
+  const d = data.data;
+  const px = (x, y) => (y * w + x) * 4;
+  const corners = [px(1, 1), px(w - 2, 1), px(1, h - 2), px(w - 2, h - 2)].map(i => [d[i], d[i + 1], d[i + 2]]);
+  const bg = [0, 1, 2].map(k => corners.reduce((a, c2) => a + c2[k], 0) / 4);
+  const spread = Math.max(...corners.map(c2 => Math.abs(c2[0] - bg[0]) + Math.abs(c2[1] - bg[1]) + Math.abs(c2[2] - bg[2])));
+  if (spread > 60) return null; // busy background — keep the photo as it is
+  const tol = 70;
+  const dist = (i) => Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+  const seen = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  let qh = 0, qt = 0;
+  const push = (x, y) => { const k = y * w + x; if (seen[k]) return; seen[k] = 1; if (dist(k * 4) <= tol){ queue[qt++] = k; } };
+  for (let x = 0; x < w; x++){ push(x, 0); push(x, h - 1); }
+  for (let y = 0; y < h; y++){ push(0, y); push(w - 1, y); }
+  while (qh < qt){
+    const k = queue[qh++]; d[k * 4 + 3] = 0;
+    const x = k % w, y = (k - x) / w;
+    if (x > 0) push(x - 1, y); if (x < w - 1) push(x + 1, y); if (y > 0) push(x, y - 1); if (y < h - 1) push(x, y + 1);
+  }
+  const removed = qt / (w * h);
+  if (removed < 0.08) return null; // almost nothing removed — not a plain background
+  // soften the edge: pixels touching the removed area fade a little
+  for (let y = 1; y < h - 1; y++){
+    for (let x = 1; x < w - 1; x++){
+      const k = y * w + x; if (d[k * 4 + 3] === 0) continue;
+      if (d[(k - 1) * 4 + 3] === 0 || d[(k + 1) * 4 + 3] === 0 || d[(k - w) * 4 + 3] === 0 || d[(k + w) * 4 + 3] === 0){
+        const dd = dist(k * 4); if (dd < tol * 2.2) d[k * 4 + 3] = Math.round(255 * Math.min(1, dd / (tol * 2.2)) * 0.9 + 25);
+      }
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  // trim to the product
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 20){ if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  const t = document.createElement('canvas'); t.width = maxX - minX + 1; t.height = maxY - minY + 1;
+  t.getContext('2d').drawImage(c, minX, minY, t.width, t.height, 0, 0, t.width, t.height);
+  return t;
+}
+function adCrown(ctx, cx, cy, w){
+  const h = w * 0.62;
+  ctx.save();
+  ctx.fillStyle = adGoldGradient(ctx, cy - h / 2, cy + h / 2);
+  ctx.beginPath();
+  ctx.moveTo(cx - w / 2, cy + h / 2);
+  ctx.lineTo(cx - w / 2, cy - h * 0.15);
+  ctx.lineTo(cx - w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx, cy - h / 2);
+  ctx.lineTo(cx + w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx + w / 2, cy - h * 0.15);
+  ctx.lineTo(cx + w / 2, cy + h / 2);
+  ctx.closePath(); ctx.fill();
+  [[-0.5, -0.15], [0, -0.5], [0.5, -0.15]].forEach(([fx, fy]) => { ctx.beginPath(); ctx.arc(cx + w * fx, cy + h * fy, w * 0.07, 0, Math.PI * 2); ctx.fill(); });
+  ctx.restore();
+}
+function adGoldText(ctx, text, x, y, size, font, maxW){
+  let s = size;
+  do { ctx.font = font.replace('{s}', s); if (!maxW || ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 16);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
+  ctx.lineWidth = Math.max(2, s / 14); ctx.strokeStyle = '#3a2600'; ctx.strokeText(text, x, y);
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = adGoldGradient(ctx, y - s / 2, y + s / 2); ctx.fillText(text, x, y);
+  ctx.restore();
+  return s;
+}
+function adInfoBox(ctx, x, y, w, h){
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 18;
+  adRoundRect(ctx, x, y, w, h, 18); ctx.fillStyle = '#0b0b0b'; ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = 4; ctx.strokeStyle = adGoldGradient(ctx, y, y + h); ctx.stroke();
+  ctx.restore();
+}
+function adGoldPill(ctx, x, y, w, h, text, size){
+  ctx.save();
+  adRoundRect(ctx, x, y, w, h, 12);
+  const g = ctx.createLinearGradient(0, y, 0, y + h); g.addColorStop(0, '#ffe9a0'); g.addColorStop(0.5, '#f0c43f'); g.addColorStop(1, '#c99a22');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = '#111'; adFitText(ctx, text, w - 24, size, 'bold'); ctx.fillText(text, x + w / 2, y + h / 2 + 2);
+  ctx.restore();
+}
+async function buildAdImagePremium(item, pct, shop, sizeChoice){
+  const W = 1080, H = 1080;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const rnd = adSeededRandom(item.id);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // background: warm dark room with golden bokeh lights
+  const bg = ctx.createRadialGradient(W * 0.6, H * 0.35, 60, W * 0.5, H * 0.45, W * 0.85);
+  bg.addColorStop(0, '#4a3410'); bg.addColorStop(0.45, '#1e1406'); bg.addColorStop(1, '#050403');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 46; i++){
+    const x = rnd() * W, y = rnd() * H * 0.72, r = 10 + rnd() * 34, a = 0.08 + rnd() * 0.22;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(255,214,120,' + a + ')'); g.addColorStop(1, 'rgba(255,190,80,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  // marble counter
+  const floorY = H * 0.78;
+  const fl = ctx.createLinearGradient(0, floorY, 0, H);
+  fl.addColorStop(0, '#5b544c'); fl.addColorStop(0.4, '#3a3530'); fl.addColorStop(1, '#1c1916');
+  ctx.fillStyle = fl; ctx.fillRect(0, floorY, W, H - floorY);
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 14; i++){ ctx.beginPath(); const sx = rnd() * W; ctx.moveTo(sx, floorY + rnd() * 30); ctx.bezierCurveTo(sx + 80, floorY + 60 + rnd() * 60, sx - 60, floorY + 120 + rnd() * 80, sx + 120 * rnd(), H); ctx.stroke(); }
+  // header: crown + shop name
+  let headerBottom = 70;
+  if (shop.name){
+    adCrown(ctx, W / 2, 52, 74);
+    adGoldText(ctx, shop.name.toUpperCase(), W / 2, 132, 82, 'bold {s}px Georgia, "Times New Roman", serif', W - 120);
+    ctx.strokeStyle = adGoldGradient(ctx, 170, 176); ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(160, 182); ctx.lineTo(W - 160, 182); ctx.stroke();
+    headerBottom = 196;
+  }
+  // sizes
+  const variations = (item.variations || []).filter(v => !v.outOfStock && (v.code || v.inch || v.price));
+  const all = sizeChoice === 'all' || !variations.length;
+  const one = all ? null : (variations[Number(sizeChoice) || 0] || variations[0]);
+  // product (cut-out on the counter, or framed photo)
+  const im = await adLoadImage(await fetchFullPhoto(currentCatalogueId, item));
+  const area = { x: 420, y: headerBottom + 30, w: 540, h: floorY + 60 - (headerBottom + 30) };
+  let prodTop = area.y, prodBottom = floorY + 50, isCutout = false;
+  if (im){
+    const cut = adCutout(im);
+    if (cut){
+      const sc = Math.min(area.w / cut.width, area.h / cut.height);
+      const iw = cut.width * sc, ih = cut.height * sc;
+      const ix = area.x + (area.w - iw) / 2, iy = area.y + area.h - ih;
+      ctx.save(); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.ellipse(ix + iw / 2, iy + ih - 4, iw * 0.48, 26, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 30; ctx.drawImage(cut, ix, iy, iw, ih); ctx.restore();
+      // soft reflection on the counter
+      ctx.save(); ctx.globalAlpha = 0.18; ctx.translate(0, (iy + ih) * 2); ctx.scale(1, -1);
+      ctx.beginPath(); ctx.rect(ix, iy + ih - 90, iw, 90); ctx.clip(); ctx.drawImage(cut, ix, iy, iw, ih); ctx.restore();
+      prodTop = iy; prodBottom = iy + ih; isCutout = true;
+    } else {
+      const fw = area.w, fh = area.h - 40, fx = area.x, fy = area.y;
+      ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 30;
+      adRoundRect(ctx, fx, fy, fw, fh, 22); ctx.fillStyle = '#fff'; ctx.fill(); ctx.restore();
+      ctx.save(); adRoundRect(ctx, fx, fy, fw, fh, 22); ctx.clip();
+      const sc = Math.min(fw / im.naturalWidth, fh / im.naturalHeight);
+      ctx.drawImage(im, fx + (fw - im.naturalWidth * sc) / 2, fy + (fh - im.naturalHeight * sc) / 2, im.naturalWidth * sc, im.naturalHeight * sc);
+      ctx.restore();
+      ctx.save(); adRoundRect(ctx, fx, fy, fw, fh, 22); ctx.lineWidth = 6; ctx.strokeStyle = adGoldGradient(ctx, fy, fy + fh); ctx.stroke(); ctx.restore();
+      prodTop = fy; prodBottom = fy + fh;
+    }
+  }
+  // height arrow (one size with a height)
+  if (one && one.inch && isCutout){
+    const ax = 1010, t = prodTop + 6, b = prodBottom - 6;
+    ctx.save(); ctx.strokeStyle = '#f3e4c0'; ctx.fillStyle = '#f3e4c0'; ctx.lineWidth = 3;
+    ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.moveTo(ax - 70, t); ctx.lineTo(ax + 20, t); ctx.moveTo(ax - 70, b); ctx.lineTo(ax + 20, b); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(ax, t + 4); ctx.lineTo(ax, b - 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ax, t); ctx.lineTo(ax - 11, t + 20); ctx.lineTo(ax + 11, t + 20); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(ax, b); ctx.lineTo(ax - 11, b - 20); ctx.lineTo(ax + 11, b - 20); ctx.fill();
+    const label = one.inch + ' INCH';
+    ctx.translate(ax, (t + b) / 2); ctx.rotate(Math.PI / 2);
+    ctx.font = 'bold 34px Arial, sans-serif'; const lw = ctx.measureText(label).width + 30;
+    ctx.fillStyle = '#0b0b0b'; ctx.fillRect(-lw / 2, -24, lw, 48);
+    ctx.fillStyle = '#ffffff'; ctx.fillText(label, 0, 2);
+    ctx.restore();
+  }
+  // offer badge
+  const bx = 215, by = headerBottom + 175, br = 150;
+  ctx.save(); ctx.shadowColor = 'rgba(255,200,80,0.55)'; ctx.shadowBlur = 40;
+  ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fillStyle = adGoldGradient(ctx, by - br, by + br); ctx.fill(); ctx.restore();
+  ctx.beginPath(); ctx.arc(bx, by, br - 16, 0, Math.PI * 2); ctx.fillStyle = '#0a0a0a'; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#8a6a1a'; ctx.stroke();
+  adGoldText(ctx, pct + '%', bx, by - 52, 116, '900 {s}px Arial, sans-serif', 250);
+  ctx.save(); ctx.font = '900 84px Arial, sans-serif'; ctx.lineWidth = 6; ctx.strokeStyle = '#222'; ctx.strokeText('OFF', bx, by + 36);
+  const wg = ctx.createLinearGradient(0, by, 0, by + 70); wg.addColorStop(0, '#ffffff'); wg.addColorStop(1, '#bdbdbd'); ctx.fillStyle = wg; ctx.fillText('OFF', bx, by + 36); ctx.restore();
+  // red ribbon
+  ctx.save(); ctx.translate(bx, by + 112); ctx.rotate(-0.12);
+  ctx.fillStyle = '#8e0f12'; ctx.beginPath(); ctx.moveTo(-175, -10); ctx.lineTo(-205, 20); ctx.lineTo(-170, 50); ctx.lineTo(-150, 30); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(175, -10); ctx.lineTo(205, 20); ctx.lineTo(170, 50); ctx.lineTo(150, 30); ctx.fill();
+  const rg = ctx.createLinearGradient(0, -36, 0, 36); rg.addColorStop(0, '#ff3b3b'); rg.addColorStop(1, '#b3121a');
+  ctx.fillStyle = rg; adRoundRect(ctx, -170, -36, 340, 72, 10); ctx.fill();
+  ctx.fillStyle = '#ffffff'; ctx.font = '900 48px Arial, sans-serif'; ctx.fillText('ON MRP', 0, 3);
+  ctx.restore();
+  // info boxes
+  const lx = 50, lw2 = 340;
+  let y = by + br + 52;
+  adInfoBox(ctx, lx, y, lw2, 128);
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 30px Arial, sans-serif'; ctx.fillText('MODEL NO.', lx + lw2 / 2, y + 32);
+  adGoldText(ctx, item.name.toUpperCase(), lx + lw2 / 2, y + 86, 62, '900 {s}px Arial, sans-serif', lw2 - 30);
+  y += 146;
+  const spaceLeft = H - 24 - (shop.phone ? 56 : 0) - y;
+  if (one){
+    const bh = Math.min(128, (spaceLeft - 18) / 2);
+    adInfoBox(ctx, lx, y, lw2, bh);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 30px Arial, sans-serif'; ctx.fillText('SIZE' + (one.code ? ' (' + one.code + ')' : ''), lx + lw2 / 2, y + bh * 0.25);
+    adGoldPill(ctx, lx + 18, y + bh * 0.45, lw2 - 36, bh * 0.45, one.inch ? one.inch + ' INCH' : (one.code || '-'), 46);
+    y += bh + 18;
+    adInfoBox(ctx, lx, y, lw2, bh);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 30px Arial, sans-serif'; ctx.fillText('MRP:', lx + lw2 / 2, y + bh * 0.25);
+    adGoldPill(ctx, lx + 18, y + bh * 0.45, lw2 - 36, bh * 0.45, one.price ? '₹' + one.price : '-', 56);
+  } else if (variations.length){
+    const rows = variations.slice(0, 6);
+    const rowH = Math.min(52, (spaceLeft - 70) / rows.length);
+    const bh = 60 + rows.length * rowH;
+    adInfoBox(ctx, lx, y, lw2, bh);
+    ctx.fillStyle = '#c9c9c9'; ctx.font = 'bold 24px Arial, sans-serif';
+    ctx.fillText('SIZE', lx + 60, y + 32); ctx.fillText('INCH', lx + 170, y + 32); ctx.fillText('MRP', lx + 275, y + 32);
+    rows.forEach((v, k) => {
+      const ry = y + 60 + k * rowH + rowH / 2;
+      ctx.font = 'bold ' + Math.round(rowH * 0.62) + 'px Arial, sans-serif';
+      ctx.fillStyle = '#f0c43f'; ctx.fillText(v.code || '-', lx + 60, ry);
+      ctx.fillStyle = '#ffffff'; ctx.fillText(v.inch ? v.inch + '"' : '-', lx + 170, ry);
+      ctx.fillStyle = '#f0c43f'; ctx.fillText(v.price ? '₹' + v.price : '-', lx + 275, ry);
+    });
+  }
+  // phone strip
+  if (shop.phone){
+    ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, H - 60, W, 60);
+    ctx.fillStyle = '#f0c43f'; ctx.font = 'bold 32px Arial, sans-serif';
+    ctx.fillText('Call / WhatsApp: ' + shop.phone, W / 2, H - 29);
+  }
+  return c;
+}
 let adModal = null;
 function openAdMaker(item){
   if (!adModal){
@@ -1689,6 +1924,13 @@ function openAdMaker(item){
           <label style="font-size:13px; color:#c9c9c9;">Offer:</label>
           <input type="number" class="ad-pct" min="1" max="99" inputmode="numeric" style="width:64px; text-align:center; padding:7px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:15px;">
           <span style="color:#c9c9c9; font-size:13px;">% OFF</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <select class="ad-style" style="flex:1; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;">
+            <option value="premium">✨ Premium design</option>
+            <option value="simple">Simple design</option>
+          </select>
+          <select class="ad-size" style="flex:1; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;"></select>
         </div>
         <div class="ad-status" style="color:#f0c43f; font-weight:700; font-size:13px; margin-bottom:8px;"></div>
         <img class="ad-preview" style="width:100%; border-radius:8px; display:block; background:#111; min-height:200px;">
@@ -1706,6 +1948,15 @@ function openAdMaker(item){
   const status = adModal.querySelector('.ad-status');
   let saved = 50; try { saved = parseInt(localStorage.getItem('shopapp-ad-offer'), 10) || 50; } catch (e) {}
   pctInput.value = saved;
+  const styleSel = adModal.querySelector('.ad-style');
+  const sizeSel = adModal.querySelector('.ad-size');
+  try { styleSel.value = localStorage.getItem('shopapp-ad-style') || 'premium'; } catch (e) { styleSel.value = 'premium'; }
+  const inStock = (item.variations || []).filter(v => !v.outOfStock && (v.code || v.inch || v.price));
+  sizeSel.innerHTML = inStock.map((v, k) => '<option value="' + k + '">Size ' + escapeHtml([v.code, v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ')) + '</option>').join('') +
+    (inStock.length > 1 ? '<option value="all">All sizes</option>' : '');
+  sizeSel.value = inStock.length > 1 ? 'all' : '0';
+  const syncSizeVisibility = () => { sizeSel.style.display = (styleSel.value === 'premium' && inStock.length) ? '' : 'none'; };
+  syncSizeVisibility();
   adModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
   let blob = null, runId = 0;
   const fileName = (item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-offer.jpg';
@@ -1714,7 +1965,12 @@ function openAdMaker(item){
     const pct = Math.min(99, Math.max(1, parseInt(pctInput.value, 10) || 50));
     try { localStorage.setItem('shopapp-ad-offer', String(pct)); } catch (e) {}
     status.textContent = '⏳ Making image...'; blob = null;
-    const canvas = await buildAdImage(item, pct, await getAdShopInfo());
+    try { localStorage.setItem('shopapp-ad-style', styleSel.value); } catch (e) {}
+    syncSizeVisibility();
+    const shopInfo = await getAdShopInfo();
+    const canvas = styleSel.value === 'premium'
+      ? await buildAdImagePremium(item, pct, shopInfo, sizeSel.value)
+      : await buildAdImage(item, pct, shopInfo);
     if (my !== runId) return;
     blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
     if (my !== runId) return;
@@ -1722,6 +1978,8 @@ function openAdMaker(item){
     status.textContent = '';
   }
   pctInput.onchange = render;
+  styleSel.onchange = render;
+  sizeSel.onchange = render;
   adModal.querySelector('.ad-download').onclick = () => {
     if (!blob) return;
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName;
