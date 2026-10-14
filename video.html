@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Video Maker">
+<title>Video Maker</title>
+<link rel="manifest" href="video.webmanifest">
+<link rel="apple-touch-icon" href="video-icon-192.png">
+<link rel="icon" href="video-icon-192.png">
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<script>
+// ---- Firebase init (shared across all three apps for live cross-device sync) ----
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+window.__firebaseReady = false;
+try {
+  firebase.initializeApp(firebaseConfig);
+  window.__db = firebase.firestore();
+  // Keep a copy on the phone (only possible on a real web address) — faster
+  // repeat opens and it keeps working on a weak signal.
+  if (location.protocol === 'https:'){
+    window.__db.enablePersistence({ synchronizeTabs: true }).catch(err => console.warn('Offline copy not enabled:', err && err.code));
+  }
+  window.__firebaseReady = true;
+} catch (err) {
+  console.error('Firebase init failed:', err);
+}
+
+// ---- Shared cloud storage layer (Firestore), used by all three apps ------
+// Every app already talks to `storage.get/set/delete(key[, value])` exactly
+// like it did with IndexedDB — only the plumbing underneath changes.
+//
+// A single bill/purchase/catalogue-item list is saved as ONE JSON string
+// under one key (e.g. "all-bills"). Firestore caps a single document at
+// ~1MB, and that blob only grows over time as the shop's history builds up
+// — so instead of trying to keep photos small enough to always fit in one
+// document (which is what silently broke last time once the data grew),
+// large values are transparently split across several small "chunk"
+// documents and reassembled on read. This means saving can't silently fail
+// just because the data got big.
+const FIRESTORE_CHUNK_SIZE = 900000; // chars per chunk, safely under the ~1MB doc cap
+
+function makeFirestoreStorage(collectionName){
+  function coll(){ return window.__db.collection(collectionName); }
+  function safeId(key){ return String(key).replace(/\//g, '_SLASH_'); }
+  function chunkId(key, i){ return safeId(key) + '__chunk' + i; }
+
+  return {
+    async get(key){
+      const snap = await coll().doc(safeId(key)).get();
+      if (!snap.exists) return null;
+      const data = snap.data();
+      if (!data.chunked) return { key, value: data.value };
+      const n = data.chunkCount || 0;
+      const parts = await Promise.all(
+        Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get())
+      );
+      return { key, value: parts.map(p => (p.exists ? p.data().part : '')).join('') };
+    },
+    async set(key, value){
+      let prevChunkCount = 0;
+      try {
+        const prevSnap = await coll().doc(safeId(key)).get();
+        if (prevSnap.exists && prevSnap.data().chunked) prevChunkCount = prevSnap.data().chunkCount || 0;
+      } catch (e) { /* no previous doc — nothing to clean up */ }
+
+      const str = String(value);
+      if (str.length <= FIRESTORE_CHUNK_SIZE){
+        await coll().doc(safeId(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        if (prevChunkCount > 0){
+          await Promise.all(Array.from({ length: prevChunkCount }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+        return { key, value: str };
+      }
+
+      const chunks = [];
+      for (let i = 0; i < str.length; i += FIRESTORE_CHUNK_SIZE) chunks.push(str.slice(i, i + FIRESTORE_CHUNK_SIZE));
+      await Promise.all(chunks.map((part, i) => coll().doc(chunkId(key, i)).set({ part })));
+      await coll().doc(safeId(key)).set({ chunked: true, chunkCount: chunks.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      if (prevChunkCount > chunks.length){
+        await Promise.all(Array.from({ length: prevChunkCount - chunks.length }, (_, i) =>
+          coll().doc(chunkId(key, chunks.length + i)).delete().catch(() => {})
+        ));
+      }
+      return { key, value: str };
+    },
+    async delete(key){
+      try {
+        const snap = await coll().doc(safeId(key)).get();
+        if (snap.exists && snap.data().chunked){
+          const n = snap.data().chunkCount || 0;
+          await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+      } catch (e) { /* ignore — still try deleting the manifest below */ }
+      await coll().doc(safeId(key)).delete();
+      return { key, deleted: true };
+    },
+    async list(prefix){
+      return { keys: [] }; // not used by any app — kept only for interface compatibility
+    },
+    // Recovery helper: every saved value whose key starts with `prefix`
+    // (e.g. all products saved under one catalogue, even ones that have
+    // dropped out of its product list). Reassembles chunked values.
+    async listByPrefix(prefix){
+      const FP = firebase.firestore.FieldPath.documentId();
+      const start = safeId(prefix);
+      const snap = await coll().where(FP, '>=', start).where(FP, '<', start + '\uf8ff').get();
+      const out = [];
+      for (const d of snap.docs){
+        if (d.id.indexOf('__chunk') !== -1) continue;
+        const key = d.id.replace(/_SLASH_/g, '/');
+        const data = d.data() || {};
+        let value = null;
+        if (!data.chunked) value = data.value;
+        else { const r = await this.get(key); value = r ? r.value : null; }
+        if (value != null) out.push({ key, value });
+      }
+      return out;
+    },
+    // Bulk write for imports: writing hundreds of items one at a time (each
+    // a separate get-then-set round trip) is what actually broke large
+    // imports before — on a slow connection it can take so long the person
+    // assumes it's done and leaves the page, so only the first few items
+    // ever get saved. This uses Firestore's batch write instead, splitting
+    // batches by BOTH item count (max 400, Firestore's own per-batch limit)
+    // AND total data size (max ~8MB, safely under Firestore's ~10MB
+    // per-request cap) — photos mean a batch can hit the size limit long
+    // before it hits the count limit. Any single value still too big for
+    // one chunk falls back to the normal chunked set() afterwards.
+    async setMany(pairs){
+      const MAX_BATCH_OPS = 400;
+      const MAX_BATCH_BYTES = 8000000;
+      const overflow = [];
+      let batch = window.__db.batch();
+      let opsInBatch = 0;
+      let bytesInBatch = 0;
+
+      for (const [key, value] of pairs){
+        const str = String(value);
+        if (str.length > FIRESTORE_CHUNK_SIZE){ overflow.push([key, value]); continue; }
+
+        if (opsInBatch > 0 && (opsInBatch >= MAX_BATCH_OPS || bytesInBatch + str.length > MAX_BATCH_BYTES)){
+          await batch.commit();
+          batch = window.__db.batch();
+          opsInBatch = 0;
+          bytesInBatch = 0;
+        }
+
+        batch.set(coll().doc(safeId(key)), { chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        opsInBatch++;
+        bytesInBatch += str.length;
+      }
+      if (opsInBatch > 0) await batch.commit();
+
+      for (const [key, value] of overflow){
+        await this.set(key, value);
+      }
+    },
+    async getAllEntries(){ return this.listByPrefix(''); },
+    // Deletes everything in this collection except keepKeys.
+    async clearAll(keepKeys){
+      const keep = new Set(keepKeys || []);
+      const all = await this.listByPrefix('');
+      await Promise.all(all.filter(r => !keep.has(r.key)).map(r => this.delete(r.key).catch(() => null)));
+    },
+    // Real-time: cb(value) fires immediately with the current value, then
+    // again every time this key changes on any device. Returns an unsubscribe
+    // function.
+    onChange(key, cb){
+      return coll().doc(safeId(key)).onSnapshot(async (snap) => {
+        if (!snap.exists){ cb(null); return; }
+        const data = snap.data();
+        if (!data.chunked){ cb(data.value); return; }
+        const n = data.chunkCount || 0;
+        try {
+          const parts = await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get()));
+          cb(parts.map(p => (p.exists ? p.data().part : '')).join(''));
+        } catch (e) { console.error('Live update failed for', key, e); }
+      }, (err) => console.error('Live sync error for', key, err));
+    }
+  };
+}
+</script>
+</head>
+<body>
+<!-- ===== PIN lock: keeps casual visitors out of the app ===== -->
+<div id="pin-lock" style="position:fixed; inset:0; z-index:99999; background:#050505; display:flex; align-items:center; justify-content:center; padding:24px;">
+  <div style="width:100%; max-width:340px; text-align:center; font-family:Arial,sans-serif;">
+    <div style="font-size:44px; margin-bottom:6px;">🔒</div>
+    <h2 id="pin-title" style="font-family:Georgia,serif; color:#f0c341; letter-spacing:1px; margin:0 0 6px; font-size:24px;">Shop App</h2>
+    <p id="pin-msg" style="color:#c9c9c9; font-size:14px; margin:0 0 18px; line-height:1.4;">Checking...</p>
+    <input id="pin-input-1" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <input id="pin-input-2" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Repeat PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <button id="pin-go-btn" type="button" style="display:none; width:100%; padding:15px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:17px; cursor:pointer;">Unlock</button>
+    <button id="pin-cancel-btn" type="button" style="display:none; width:100%; margin-top:10px; padding:13px; border:1.5px solid #333; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+    <p id="pin-error" style="color:#e0705a; font-size:14px; font-weight:700; min-height:20px; margin:12px 0 0;"></p>
+    <p id="pin-help" style="display:none; color:#8a8a8a; font-size:12px; margin:14px 0 0; line-height:1.4;">Forgot the PIN? Open the app on a phone that's already unlocked and use 🔒 → Change PIN.</p>
+  </div>
+</div>
+
+<div id="app-topbar" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:#0a2a1a; border-bottom:1.5px solid #25d366; position:relative; font-family:Arial,sans-serif;">
+  <span style="font-size:12px; font-weight:700; color:#7cd992; white-space:nowrap;">☁️ Cloud</span>
+  <span style="display:flex; gap:6px;">
+    <button id="install-btn" type="button" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:7px 12px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap;">📲 Add to Home Screen</button>
+    <button id="pin-menu-btn" type="button" title="Lock / Change PIN" style="background:none; border:1px solid #25d366; color:#7cd992; border-radius:6px; padding:4px 9px; font-size:13px; cursor:pointer;">🔒</button>
+  </span>
+  <div id="pin-menu" style="display:none; position:absolute; right:8px; top:100%; margin-top:4px; z-index:9000; background:#161616; border:1.5px solid #b8912f; border-radius:8px; overflow:hidden; text-align:left;">
+    <button type="button" id="pin-lock-now" style="display:block; width:100%; padding:12px 18px; background:none; border:none; border-bottom:1px solid #333; color:#f0c341; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔒 Lock now</button>
+    <button type="button" id="pin-change" style="display:block; width:100%; padding:12px 18px; background:none; border:none; color:#c9c9c9; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔑 Change PIN</button>
+  </div>
+</div>
+<script>
+// ---- PIN lock ----
+// One PIN for the whole shop, stored (as a scrambled fingerprint, never the
+// PIN itself) in the cloud so it's the same on every phone. Once a phone is
+// unlocked it stays unlocked until you tap 🔒 → Lock now, or the PIN changes.
+// Note: this keeps casual visitors out of the app screen; it is not the same
+// as a full account login.
+(function(){
+  const lockEl = document.getElementById('pin-lock');
+  const titleEl = document.getElementById('pin-title');
+  const msgEl = document.getElementById('pin-msg');
+  const in1 = document.getElementById('pin-input-1');
+  const in2 = document.getElementById('pin-input-2');
+  const goBtn = document.getElementById('pin-go-btn');
+  const errEl = document.getElementById('pin-error');
+  const helpEl = document.getElementById('pin-help');
+  const PIN_KEY = 'app-pin';
+  const LOCAL_KEY = 'shopapp-unlocked-with';
+  const pinStore = makeFirestoreStorage('billing_kv');
+  let mode = 'checking'; // 'set' | 'unlock' | 'change'
+  let cloudPin = null;   // { hash, salt }
+
+  function fingerprint(pin, salt){
+    const s = salt + ':' + pin + ':shop-app';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let r = 0; r < 500; r++){ // repeated so guessing is slow
+      for (let i = 0; i < s.length; i++){
+        const ch = s.charCodeAt(i) + r;
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    }
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+  function localGet(){ try { return localStorage.getItem(LOCAL_KEY); } catch (e) { return null; } }
+  function localSet(v){ try { if (v) localStorage.setItem(LOCAL_KEY, v); else localStorage.removeItem(LOCAL_KEY); } catch (e) {} }
+
+  function showLock(newMode, message){
+    mode = newMode;
+    lockEl.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    titleEl.textContent = newMode === 'set' ? 'Set a PIN' : newMode === 'change' ? 'Change PIN' : 'Shop App';
+    msgEl.textContent = message;
+    errEl.textContent = '';
+    const typing = newMode !== 'checking';
+    in1.style.display = typing ? 'block' : 'none';
+    in2.style.display = (newMode === 'set' || newMode === 'change') ? 'block' : 'none';
+    goBtn.style.display = typing ? 'block' : 'none';
+    goBtn.textContent = newMode === 'unlock' ? 'Unlock' : 'Save PIN';
+    helpEl.style.display = newMode === 'unlock' ? 'block' : 'none';
+    document.getElementById('pin-cancel-btn').style.display = newMode === 'change' ? 'block' : 'none';
+    in1.value = ''; in2.value = '';
+    in1.placeholder = newMode === 'unlock' ? 'PIN' : 'New PIN';
+    if (typing) setTimeout(() => in1.focus(), 50);
+  }
+  function hideLock(){
+    lockEl.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function savePin(pin){
+    const salt = Math.random().toString(36).slice(2, 10);
+    const rec = { hash: fingerprint(pin, salt), salt };
+    await pinStore.set(PIN_KEY, JSON.stringify(rec));
+    cloudPin = rec;
+    localSet(rec.hash);
+  }
+
+  async function submit(){
+    errEl.textContent = '';
+    const p1 = in1.value.trim(), p2 = in2.value.trim();
+    if (!/^\d{4,8}$/.test(p1)){ errEl.textContent = 'PIN must be 4 to 8 digits.'; return; }
+    if (mode === 'unlock'){
+      if (cloudPin && fingerprint(p1, cloudPin.salt) === cloudPin.hash){
+        localSet(cloudPin.hash);
+        hideLock();
+      } else {
+        errEl.textContent = 'Wrong PIN — try again.';
+        in1.value = '';
+      }
+      return;
+    }
+    if (p1 !== p2){ errEl.textContent = 'The two PINs don\'t match.'; return; }
+    goBtn.disabled = true; goBtn.textContent = 'Saving...';
+    try {
+      await savePin(p1);
+      hideLock();
+      if (mode === 'change') alert('PIN changed ✓ — other phones will ask for the new PIN next time.');
+    } catch (e) {
+      errEl.textContent = 'Could not save the PIN — check your internet and try again.';
+    } finally {
+      goBtn.disabled = false; goBtn.textContent = 'Save PIN';
+    }
+  }
+  goBtn.addEventListener('click', submit);
+  document.getElementById('pin-cancel-btn').addEventListener('click', hideLock);
+  [in1, in2].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  async function start(){
+    showLock('checking', 'Checking...');
+    let r;
+    try {
+      r = await pinStore.get(PIN_KEY);
+    } catch (e) {
+      // Offline: a phone that was already unlocked keeps working.
+      if (localGet()) { hideLock(); return; }
+      showLock('checking', 'Can\'t reach the internet to check the PIN. Connect and reopen the app.');
+      return;
+    }
+    if (!r || !r.value){
+      showLock('set', 'Choose a 4–8 digit PIN for your shop app. Everyone using the app will need it once on each phone.');
+      return;
+    }
+    try { cloudPin = JSON.parse(r.value); } catch (e) { cloudPin = null; }
+    if (cloudPin && localGet() === cloudPin.hash){ hideLock(); return; }
+    showLock('unlock', 'Enter your shop PIN.');
+  }
+
+  // 🔒 menu
+  const menuBtn = document.getElementById('pin-menu-btn');
+  const menu = document.getElementById('pin-menu');
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; });
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.getElementById('pin-lock-now').addEventListener('click', () => {
+    localSet(null);
+    showLock('unlock', 'Locked. Enter your shop PIN.');
+  });
+  document.getElementById('pin-change').addEventListener('click', () => {
+    // This phone is already unlocked, so it's trusted to set a new PIN.
+    showLock('change', 'Type a new 4–8 digit PIN twice. All phones will need the new PIN once.');
+  });
+
+  start();
+})();
+</script>
+<script>
+// ---- "Add to Home Screen" ----
+(function(){
+  const btn = document.getElementById('install-btn');
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none'; // already opened from the home-screen icon
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.addEventListener('click', async () => {
+    if (deferred){
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) {}
+      deferred = null;
+      return;
+    }
+    if (location.protocol !== 'https:'){
+      alert('To add this app to your home screen, open it from its web address (your GitHub link) — not from a downloaded or WhatsApp file.');
+      return;
+    }
+    alert('Your phone didn\'t offer the quick install, so add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker not registered:', err));
+  }
+})();
+</script>
+<script>
+// ---- drawing helpers shared with the Catalogue ad maker ----
+function adLoadImage(src){
+  return new Promise((resolve) => {
+    if (!src){ resolve(null); return; }
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+}
+function adRoundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function adFitText(ctx, text, maxW, size, weight){
+  let s = size;
+  do { ctx.font = weight + ' ' + s + 'px Arial, sans-serif'; if (ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 18);
+  return s;
+}
+function adSeededRandom(seed){ let x = (Number(seed) || 1) % 2147483647; if (x <= 0) x += 2147483646; return () => (x = x * 16807 % 2147483647) / 2147483647; }
+function adGoldGradient(ctx, y0, y1){
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, '#fff6c2'); g.addColorStop(0.35, '#f5cf55'); g.addColorStop(0.6, '#c9971f'); g.addColorStop(1, '#ffe38a');
+  return g;
+}
+// Removes a plain (white / single-colour) photo background so the product
+// stands on the ad. Returns null when the background isn't plain enough.
+function adCutout(im){
+  const maxSide = 900;
+  const sc = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * sc)), h = Math.max(1, Math.round(im.naturalHeight * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.drawImage(im, 0, 0, w, h);
+  let data;
+  try { data = ctx.getImageData(0, 0, w, h); } catch (e) { return null; }
+  const d = data.data;
+  const px = (x, y) => (y * w + x) * 4;
+  const corners = [px(1, 1), px(w - 2, 1), px(1, h - 2), px(w - 2, h - 2)].map(i => [d[i], d[i + 1], d[i + 2]]);
+  const bg = [0, 1, 2].map(k => corners.reduce((a, c2) => a + c2[k], 0) / 4);
+  const spread = Math.max(...corners.map(c2 => Math.abs(c2[0] - bg[0]) + Math.abs(c2[1] - bg[1]) + Math.abs(c2[2] - bg[2])));
+  if (spread > 60) return null; // busy background — keep the photo as it is
+  const tol = 70;
+  const dist = (i) => Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+  const seen = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  let qh = 0, qt = 0;
+  const push = (x, y) => { const k = y * w + x; if (seen[k]) return; seen[k] = 1; if (dist(k * 4) <= tol){ queue[qt++] = k; } };
+  for (let x = 0; x < w; x++){ push(x, 0); push(x, h - 1); }
+  for (let y = 0; y < h; y++){ push(0, y); push(w - 1, y); }
+  while (qh < qt){
+    const k = queue[qh++]; d[k * 4 + 3] = 0;
+    const x = k % w, y = (k - x) / w;
+    if (x > 0) push(x - 1, y); if (x < w - 1) push(x + 1, y); if (y > 0) push(x, y - 1); if (y < h - 1) push(x, y + 1);
+  }
+  const removed = qt / (w * h);
+  if (removed < 0.08) return null; // almost nothing removed — not a plain background
+  // soften the edge: pixels touching the removed area fade a little
+  for (let y = 1; y < h - 1; y++){
+    for (let x = 1; x < w - 1; x++){
+      const k = y * w + x; if (d[k * 4 + 3] === 0) continue;
+      if (d[(k - 1) * 4 + 3] === 0 || d[(k + 1) * 4 + 3] === 0 || d[(k - w) * 4 + 3] === 0 || d[(k + w) * 4 + 3] === 0){
+        const dd = dist(k * 4); if (dd < tol * 2.2) d[k * 4 + 3] = Math.round(255 * Math.min(1, dd / (tol * 2.2)) * 0.9 + 25);
+      }
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  // trim to the product
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 20){ if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  const t = document.createElement('canvas'); t.width = maxX - minX + 1; t.height = maxY - minY + 1;
+  t.getContext('2d').drawImage(c, minX, minY, t.width, t.height, 0, 0, t.width, t.height);
+  return t;
+}
+function adCrown(ctx, cx, cy, w){
+  const h = w * 0.62;
+  ctx.save();
+  ctx.fillStyle = adGoldGradient(ctx, cy - h / 2, cy + h / 2);
+  ctx.beginPath();
+  ctx.moveTo(cx - w / 2, cy + h / 2);
+  ctx.lineTo(cx - w / 2, cy - h * 0.15);
+  ctx.lineTo(cx - w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx, cy - h / 2);
+  ctx.lineTo(cx + w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx + w / 2, cy - h * 0.15);
+  ctx.lineTo(cx + w / 2, cy + h / 2);
+  ctx.closePath(); ctx.fill();
+  [[-0.5, -0.15], [0, -0.5], [0.5, -0.15]].forEach(([fx, fy]) => { ctx.beginPath(); ctx.arc(cx + w * fx, cy + h * fy, w * 0.07, 0, Math.PI * 2); ctx.fill(); });
+  ctx.restore();
+}
+function adGoldText(ctx, text, x, y, size, font, maxW){
+  let s = size;
+  do { ctx.font = font.replace('{s}', s); if (!maxW || ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 16);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
+  ctx.lineWidth = Math.max(2, s / 14); ctx.strokeStyle = '#3a2600'; ctx.strokeText(text, x, y);
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = adGoldGradient(ctx, y - s / 2, y + s / 2); ctx.fillText(text, x, y);
+  ctx.restore();
+  return s;
+}
+function adInfoBox(ctx, x, y, w, h){
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 18;
+  adRoundRect(ctx, x, y, w, h, 18); ctx.fillStyle = '#0b0b0b'; ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = 4; ctx.strokeStyle = adGoldGradient(ctx, y, y + h); ctx.stroke();
+  ctx.restore();
+}
+function adGoldPill(ctx, x, y, w, h, text, size){
+  ctx.save();
+  adRoundRect(ctx, x, y, w, h, 12);
+  const g = ctx.createLinearGradient(0, y, 0, y + h); g.addColorStop(0, '#ffe9a0'); g.addColorStop(0.5, '#f0c43f'); g.addColorStop(1, '#c99a22');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = '#111'; adFitText(ctx, text, w - 24, size, 'bold'); ctx.fillText(text, x + w / 2, y + h / 2 + 2);
+  ctx.restore();
+}
+</script>
+<style>
+  :root{ --gold:#f0c341; --gold-2:#b8912f; --bg:#050505; --card:#141414; --line:#2c2c2c; --text:#f2e8cf; --muted:#a9a9a9; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; }
+  .wrap{ max-width:560px; margin:0 auto; padding:14px 14px 40px; }
+  h1{ font-family:Georgia, serif; color:var(--gold); letter-spacing:1px; font-size:26px; margin:6px 0 2px; }
+  .sub{ color:var(--muted); font-size:13px; margin:0 0 14px; line-height:1.4; }
+  .card{ background:var(--card); border:1.5px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .card h2{ font-size:14px; letter-spacing:1px; color:var(--gold); margin:0 0 10px; text-transform:uppercase; }
+  .tabs{ display:flex; gap:8px; margin-bottom:12px; }
+  .tab{ flex:1; padding:12px 6px; border-radius:8px; border:1.5px solid var(--gold-2); background:none; color:var(--gold); font-weight:800; font-size:14px; }
+  .tab.active{ background:var(--gold); color:#000; }
+  select, input[type=text], input[type=number], input[type=tel]{ width:100%; padding:11px; border-radius:7px; border:1.5px solid #3a3a3a; background:#0b0b0b; color:#fff; font-size:15px; font-weight:700; }
+  label.lb{ display:block; font-size:12px; font-weight:700; color:var(--muted); margin:10px 0 5px; }
+  .row{ display:flex; gap:8px; }
+  .row > *{ flex:1; min-width:0; }
+  .btn{ width:100%; padding:13px; border-radius:8px; border:none; font-weight:800; font-size:15px; background:var(--gold); color:#000; cursor:pointer; }
+  .btn.outline{ background:none; border:1.5px solid var(--gold-2); color:var(--gold); }
+  .btn.green{ background:#25d366; }
+  .btn[disabled]{ opacity:.5; }
+  .grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; max-height:380px; overflow:auto; margin-top:10px; }
+  .pcard{ background:#0b0b0b; border:2px solid #262626; border-radius:8px; overflow:hidden; cursor:pointer; }
+  .pcard.sel{ border-color:var(--gold); }
+  .pcard img{ width:100%; height:90px; object-fit:contain; background:#fff; display:block; }
+  .pcard div{ font-size:11px; font-weight:800; padding:5px; color:#ddd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vrow{ display:flex; gap:6px; margin-bottom:6px; }
+  .vrow input{ padding:9px; font-size:14px; }
+  .vrow .x{ flex:0 0 36px; background:none; border:none; color:#e0705a; font-size:18px; font-weight:800; }
+  #preview-wrap{ display:flex; justify-content:center; }
+  #stage{ width:100%; max-width:340px; aspect-ratio:9/16; border-radius:10px; border:1.5px solid var(--gold-2); background:#000; }
+  #status{ color:var(--gold); font-weight:800; font-size:14px; margin:10px 0 0; min-height:18px; text-align:center; }
+  .bar{ height:8px; background:#222; border-radius:4px; overflow:hidden; margin-top:8px; display:none; }
+  .bar > div{ height:100%; width:0; background:var(--gold); }
+  #result video{ width:100%; max-width:340px; display:block; margin:0 auto; border-radius:10px; background:#000; }
+  .hint{ color:#8a8a8a; font-size:12px; line-height:1.45; margin:8px 0 0; }
+  .empty{ color:#8a8a8a; font-size:13px; text-align:center; padding:18px 0; }
+</style>
+
+<div class="wrap">
+  <h1>🎬 Video Maker</h1>
+  <p class="sub">Make a Reel (9:16) for your product — photo, offer badge, model, sizes &amp; MRP, with animation and music.</p>
+
+  <div class="card">
+    <h2>1. Choose product</h2>
+    <div class="tabs">
+      <button type="button" class="tab active" id="tab-cat">📚 From Catalogue</button>
+      <button type="button" class="tab" id="tab-up">📷 Upload Photo</button>
+    </div>
+    <div id="panel-cat">
+      <select id="cat-select"><option value="">Loading catalogues...</option></select>
+      <input type="text" id="cat-search" placeholder="🔍 Search model no..." style="margin-top:8px;">
+      <div class="grid" id="cat-grid"><div class="empty">Loading...</div></div>
+    </div>
+    <div id="panel-up" style="display:none;">
+      <button type="button" class="btn outline" id="up-btn">📷 Choose a photo</button>
+      <input type="file" id="up-file" accept="image/*" style="display:none;">
+      <p class="hint">Tip: a photo with a plain white background looks best — the app cuts the product out and stands it on the counter.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Details on the video</h2>
+    <label class="lb">Model No.</label>
+    <input type="text" id="f-name" placeholder="e.g. AC-37">
+    <label class="lb">Sizes (Size · Inch · MRP)</label>
+    <div id="f-vars"></div>
+    <button type="button" class="btn outline" id="f-addvar" style="padding:9px; font-size:13px;">+ Add size</button>
+    <div class="row">
+      <div><label class="lb">Show on video</label><select id="f-show"></select></div>
+      <div><label class="lb">Offer (% OFF on MRP)</label><input type="number" id="f-pct" min="1" max="99" inputmode="numeric" value="50"></div>
+    </div>
+    <div class="row">
+      <div><label class="lb">Shop name</label><input type="text" id="f-shop" placeholder="Your shop name"></div>
+      <div><label class="lb">Phone</label><input type="tel" id="f-phone" placeholder="Phone / WhatsApp"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Video settings</h2>
+    <div class="row">
+      <div><label class="lb">Length</label>
+        <select id="f-len"><option value="10">10 seconds</option><option value="15" selected>15 seconds</option><option value="20">20 seconds</option></select></div>
+      <div><label class="lb">Music (optional)</label>
+        <button type="button" class="btn outline" id="music-btn" style="padding:11px; font-size:13px;">🎵 Add music</button>
+        <input type="file" id="music-file" accept="audio/*" style="display:none;"></div>
+    </div>
+    <p class="hint" id="music-name">No music — the video will be silent.</p>
+  </div>
+
+  <div class="card">
+    <h2>4. Preview</h2>
+    <div id="preview-wrap"><canvas id="stage" width="720" height="1280"></canvas></div>
+    <div id="status"></div>
+    <div class="bar" id="bar"><div></div></div>
+    <button type="button" class="btn" id="make-btn" style="margin-top:12px; font-size:17px; padding:15px;">🎬 Make Video</button>
+    <p class="hint">Keep the screen on and stay on this page while the video is being made (it takes as long as the video).</p>
+  </div>
+
+  <div class="card" id="result" style="display:none;">
+    <h2>5. Your video</h2>
+    <video id="result-video" controls playsinline></video>
+    <div class="row" style="margin-top:10px;">
+      <button type="button" class="btn green" id="share-btn">📤 Share</button>
+      <button type="button" class="btn" id="dl-btn">⬇ Download</button>
+    </div>
+    <p class="hint" id="result-note"></p>
+  </div>
+</div>
+
+<script>
+// ===================== Video Maker =====================
+const VW = 720, VH = 1280;
+const stage = document.getElementById('stage');
+const sctx = stage.getContext('2d');
+const statusEl = document.getElementById('status');
+const barEl = document.getElementById('bar');
+const catStore = makeFirestoreStorage('catalogue_kv');
+const billStore = makeFirestoreStorage('billing_kv');
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+let product = { photo: '', name: '', variations: [] }; // photo = full-size data URL
+let scene = null;       // prepared drawing data
+let previewStart = performance.now();
+let recording = false;
+let musicBlob = null, musicName = '';
+
+// ---------- small helpers ----------
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const easeOut = (x) => 1 - Math.pow(1 - clamp01(x), 3);
+const easeBack = (x) => { x = clamp01(x); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const prog = (t, a, b) => clamp01((t - a) / (b - a));
+
+// ---------- tabs ----------
+const tabCat = document.getElementById('tab-cat'), tabUp = document.getElementById('tab-up');
+tabCat.onclick = () => { tabCat.classList.add('active'); tabUp.classList.remove('active'); document.getElementById('panel-cat').style.display = ''; document.getElementById('panel-up').style.display = 'none'; };
+tabUp.onclick = () => { tabUp.classList.add('active'); tabCat.classList.remove('active'); document.getElementById('panel-up').style.display = ''; document.getElementById('panel-cat').style.display = 'none'; };
+
+// ---------- catalogue browser ----------
+const catSelect = document.getElementById('cat-select');
+const catGrid = document.getElementById('cat-grid');
+const catSearch = document.getElementById('cat-search');
+let catItems = [], catId = '';
+async function loadCatalogueList(){
+  try {
+    const r = await catStore.get('catalogue-list');
+    const cats = r && r.value ? JSON.parse(r.value) : [];
+    if (!cats.length){ catSelect.innerHTML = '<option value="">No catalogues yet</option>'; catGrid.innerHTML = '<div class="empty">No products — use Upload Photo.</div>'; return; }
+    catSelect.innerHTML = cats.map(c => '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
+    const last = lsGet('shopapp-video-cat', '');
+    if (last && cats.some(c => c.id === last)) catSelect.value = last;
+    loadCatalogueItems();
+  } catch (e) {
+    console.error(e);
+    catSelect.innerHTML = '<option value="">Could not load — check internet</option>';
+    catGrid.innerHTML = '<div class="empty">Could not load the catalogue. You can still use Upload Photo.</div>';
+  }
+}
+async function loadCatalogueItems(){
+  catId = catSelect.value; lsSet('shopapp-video-cat', catId);
+  catGrid.innerHTML = '<div class="empty">Loading products...</div>';
+  const myCat = catId;
+  try {
+    const idx = await catStore.get('index:' + myCat);
+    const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+    const list = await Promise.all(ids.map(id => catStore.get('item:' + myCat + ':' + id).then(r => (r && r.value ? JSON.parse(r.value) : null)).catch(() => null)));
+    if (myCat !== catId) return;
+    catItems = list.filter(Boolean);
+    renderCatGrid();
+  } catch (e) {
+    console.error(e); catGrid.innerHTML = '<div class="empty">Could not load products.</div>';
+  }
+}
+function renderCatGrid(){
+  const q = catSearch.value.trim().toLowerCase();
+  const shown = catItems.filter(it => !q || String(it.name || '').toLowerCase().includes(q) || (it.variations || []).some(v => String(v.code || '').toLowerCase().includes(q)));
+  if (!shown.length){ catGrid.innerHTML = '<div class="empty">No products found.</div>'; return; }
+  catGrid.innerHTML = '';
+  shown.forEach(it => {
+    const d = document.createElement('div');
+    d.className = 'pcard' + (product.fromId === it.id ? ' sel' : '');
+    d.innerHTML = '<img loading="lazy" alt=""><div></div>';
+    d.querySelector('img').src = it.thumb || it.dataUrl || '';
+    d.querySelector('div').textContent = it.name;
+    d.onclick = () => pickCatalogueItem(it, d);
+    catGrid.appendChild(d);
+  });
+}
+catSelect.onchange = loadCatalogueItems;
+catSearch.oninput = renderCatGrid;
+async function pickCatalogueItem(it, el){
+  catGrid.querySelectorAll('.pcard').forEach(x => x.classList.remove('sel'));
+  el.classList.add('sel');
+  statusEl.textContent = '⏳ Getting full photo...';
+  let full = it.dataUrl || '';
+  if (!full){ try { const r = await catStore.get('photo:' + catId + ':' + it.id); full = r && r.value ? r.value : ''; } catch (e) {} }
+  if (!full) full = it.thumb || '';
+  setProduct({ photo: full, name: it.name || '', variations: (it.variations || []).filter(v => !v.outOfStock).map(v => ({ code: v.code || '', inch: v.inch || '', price: v.price || '' })), fromId: it.id });
+}
+
+// ---------- upload ----------
+document.getElementById('up-btn').onclick = () => document.getElementById('up-file').click();
+document.getElementById('up-file').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  statusEl.textContent = '⏳ Reading photo...';
+  const url = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(''); r.readAsDataURL(f); });
+  // keep it a sensible size for speed
+  const im = await adLoadImage(url);
+  let photo = url;
+  if (im && Math.max(im.naturalWidth, im.naturalHeight) > 1600){
+    const sc = 1600 / Math.max(im.naturalWidth, im.naturalHeight);
+    const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * sc); c.height = Math.round(im.naturalHeight * sc);
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(im, 0, 0, c.width, c.height);
+    photo = c.toDataURL('image/jpeg', 0.9);
+  }
+  setProduct({ photo, name: product.fromId ? '' : product.name, variations: product.fromId ? [{ code: 'A', inch: '', price: '' }] : product.variations, fromId: null });
+};
+
+// ---------- details form ----------
+const fName = document.getElementById('f-name'), fVars = document.getElementById('f-vars'), fShow = document.getElementById('f-show');
+const fPct = document.getElementById('f-pct'), fShop = document.getElementById('f-shop'), fPhone = document.getElementById('f-phone'), fLen = document.getElementById('f-len');
+fPct.value = lsGet('shopapp-ad-offer', '50');
+fLen.value = lsGet('shopapp-video-len', '15');
+function setProduct(p){
+  product = p;
+  if (!product.variations.length) product.variations = [{ code: 'A', inch: '', price: '' }];
+  fName.value = product.name;
+  renderVarRows();
+  rebuildScene();
+}
+function renderVarRows(){
+  fVars.innerHTML = '';
+  product.variations.forEach((v, i) => {
+    const row = document.createElement('div'); row.className = 'vrow';
+    row.innerHTML = '<input type="text" placeholder="Size"><input type="text" inputmode="decimal" placeholder="Inch"><input type="text" inputmode="numeric" placeholder="MRP"><button type="button" class="x">✕</button>';
+    const [a, b, c] = row.querySelectorAll('input');
+    a.value = v.code; b.value = v.inch; c.value = v.price;
+    a.oninput = () => { v.code = a.value; refreshShowOptions(); rebuildSceneSoon(); };
+    b.oninput = () => { v.inch = b.value; refreshShowOptions(); rebuildSceneSoon(); };
+    c.oninput = () => { v.price = c.value; refreshShowOptions(); rebuildSceneSoon(); };
+    row.querySelector('.x').onclick = () => { product.variations.splice(i, 1); renderVarRows(); rebuildScene(); };
+    fVars.appendChild(row);
+  });
+  refreshShowOptions();
+}
+function refreshShowOptions(){
+  const prev = fShow.value;
+  const vs = product.variations;
+  fShow.innerHTML = vs.map((v, k) => '<option value="' + k + '">Size ' + escapeHtml([v.code, v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') || (k + 1)) + '</option>').join('') + (vs.length > 1 ? '<option value="all">All sizes</option>' : '');
+  if ([...fShow.options].some(o => o.value === prev)) fShow.value = prev; else fShow.value = vs.length > 1 ? 'all' : '0';
+}
+document.getElementById('f-addvar').onclick = () => { product.variations.push({ code: String.fromCharCode(65 + product.variations.length), inch: '', price: '' }); renderVarRows(); rebuildScene(); };
+fName.oninput = () => { product.name = fName.value; rebuildSceneSoon(); };
+fShow.onchange = rebuildScene;
+fPct.onchange = () => { lsSet('shopapp-ad-offer', String(fPct.value)); rebuildScene(); };
+fLen.onchange = () => { lsSet('shopapp-video-len', fLen.value); previewStart = performance.now(); };
+fShop.oninput = () => { lsSet('shopapp-video-shop', fShop.value); rebuildSceneSoon(); };
+fPhone.oninput = () => { lsSet('shopapp-video-phone', fPhone.value); rebuildSceneSoon(); };
+let rebuildTimer = null;
+function rebuildSceneSoon(){ clearTimeout(rebuildTimer); rebuildTimer = setTimeout(rebuildScene, 350); }
+
+async function loadShopDefaults(){
+  const savedShop = lsGet('shopapp-video-shop', null), savedPhone = lsGet('shopapp-video-phone', null);
+  if (savedShop != null) fShop.value = savedShop;
+  if (savedPhone != null) fPhone.value = savedPhone;
+  if (savedShop != null && savedPhone != null) return;
+  try {
+    const r = await billStore.get('shop-settings');
+    const st = r && r.value ? JSON.parse(r.value) : {};
+    if (savedShop == null) fShop.value = st.name || '';
+    if (savedPhone == null) fPhone.value = st.phone || '';
+    rebuildScene();
+  } catch (e) {}
+}
+
+// ---------- music (remembered on this phone) ----------
+function musicDb(){
+  return new Promise((res, rej) => { const r = indexedDB.open('shopapp-video', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function saveMusic(blob, name){ try { const db = await musicDb(); const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(blob ? { blob, name } : null, 'music'); } catch (e) {} }
+async function loadMusic(){ try { const db = await musicDb(); const v = await new Promise(res => { const g = db.transaction('kv').objectStore('kv').get('music'); g.onsuccess = () => res(g.result); g.onerror = () => res(null); }); if (v && v.blob){ musicBlob = v.blob; musicName = v.name; } } catch (e) {} showMusic(); }
+function showMusic(){
+  document.getElementById('music-name').textContent = musicBlob ? ('🎵 ' + musicName + ' — tap the button to change or remove.') : 'No music — the video will be silent.';
+  document.getElementById('music-btn').textContent = musicBlob ? '🎵 Change / remove' : '🎵 Add music';
+}
+document.getElementById('music-btn').onclick = () => {
+  if (musicBlob && confirm('Remove the music? (OK = remove, Cancel = choose a different song)')){ musicBlob = null; musicName = ''; saveMusic(null); showMusic(); return; }
+  document.getElementById('music-file').click();
+};
+document.getElementById('music-file').onchange = (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  musicBlob = f; musicName = f.name; saveMusic(f, f.name); showMusic();
+};
+
+// ---------- scene preparation ----------
+let bokehSprite = null, bgCanvas = null;
+function makeStatics(){
+  bokehSprite = document.createElement('canvas'); bokehSprite.width = bokehSprite.height = 64;
+  const b = bokehSprite.getContext('2d'); const g = b.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,214,120,1)'); g.addColorStop(0.5, 'rgba(255,200,90,0.45)'); g.addColorStop(1, 'rgba(255,190,80,0)');
+  b.fillStyle = g; b.fillRect(0, 0, 64, 64);
+  bgCanvas = document.createElement('canvas'); bgCanvas.width = VW; bgCanvas.height = VH;
+  const c = bgCanvas.getContext('2d');
+  const bg = c.createRadialGradient(VW * 0.55, VH * 0.3, 40, VW * 0.5, VH * 0.4, VH * 0.75);
+  bg.addColorStop(0, '#4a3410'); bg.addColorStop(0.45, '#1e1406'); bg.addColorStop(1, '#050403');
+  c.fillStyle = bg; c.fillRect(0, 0, VW, VH);
+  const floorY = 700;
+  const fl = c.createLinearGradient(0, floorY, 0, VH);
+  fl.addColorStop(0, '#5b544c'); fl.addColorStop(0.25, '#36312c'); fl.addColorStop(1, '#0d0b09');
+  c.fillStyle = fl; c.fillRect(0, floorY, VW, VH - floorY);
+  const rnd = adSeededRandom(7);
+  c.strokeStyle = 'rgba(255,255,255,0.06)'; c.lineWidth = 2;
+  for (let i = 0; i < 12; i++){ c.beginPath(); const sx = rnd() * VW; c.moveTo(sx, floorY + rnd() * 20); c.bezierCurveTo(sx + 60, floorY + 60 + rnd() * 60, sx - 50, floorY + 140 + rnd() * 80, sx + 90 * rnd(), floorY + 300); c.stroke(); }
+}
+async function rebuildScene(){
+  const my = (rebuildScene.n = (rebuildScene.n || 0) + 1);
+  if (!product.photo){ scene = null; return; }
+  statusEl.textContent = '⏳ Preparing...';
+  const im = await adLoadImage(product.photo);
+  if (my !== rebuildScene.n) return;
+  const s = {
+    name: (fName.value || product.name || '').trim(),
+    shop: fShop.value.trim(), phone: fPhone.value.trim(),
+    pct: Math.min(99, Math.max(1, parseInt(fPct.value, 10) || 50)),
+    vars: product.variations.filter(v => v.code || v.inch || v.price),
+    show: fShow.value
+  };
+  s.one = s.show === 'all' || !s.vars.length ? null : (s.vars[Number(s.show) || 0] || s.vars[0]);
+  s.headerBottom = s.shop ? 196 : 70;
+  const area = { x: 210, y: s.headerBottom + 20, w: 450, h: 740 - (s.headerBottom + 20) };
+  s.cut = im ? adCutout(im) : null;
+  if (s.cut){
+    const sc = Math.min(area.w / s.cut.width, area.h / s.cut.height);
+    s.pw = s.cut.width * sc; s.ph = s.cut.height * sc;
+    s.px = area.x + (area.w - s.pw) / 2; s.py = area.y + area.h - s.ph;
+    s.img = s.cut;
+  } else if (im){
+    // framed photo
+    const fw = 470, fh = Math.min(500, area.h - 20);
+    const f = document.createElement('canvas'); f.width = fw; f.height = fh;
+    const x = f.getContext('2d');
+    adRoundRect(x, 0, 0, fw, fh, 22); x.fillStyle = '#fff'; x.fill(); x.save(); x.clip();
+    const sc = Math.min(fw / im.naturalWidth, fh / im.naturalHeight);
+    x.drawImage(im, (fw - im.naturalWidth * sc) / 2, (fh - im.naturalHeight * sc) / 2, im.naturalWidth * sc, im.naturalHeight * sc);
+    x.restore(); adRoundRect(x, 3, 3, fw - 6, fh - 6, 20); x.lineWidth = 6; x.strokeStyle = adGoldGradient(x, 0, fh); x.stroke();
+    s.img = f; s.pw = fw; s.ph = fh; s.px = (VW - fw) / 2 + 40; s.py = area.y + (area.h - fh) / 2;
+  }
+  // sparkle positions around the product
+  const rnd = adSeededRandom(product.fromId || 99);
+  s.sparkles = Array.from({ length: 14 }, () => ({ x: s.px + rnd() * s.pw, y: s.py + rnd() * s.ph * 0.85, p: rnd() * 3, r: 8 + rnd() * 12 }));
+  s.bokeh = Array.from({ length: 34 }, () => ({ x: rnd() * VW, y: rnd() * 760, r: 14 + rnd() * 40, a: 0.12 + rnd() * 0.3, sp: 6 + rnd() * 16, ph: rnd() * 6 }));
+  scene = s;
+  statusEl.textContent = '';
+  previewStart = performance.now();
+}
+
+// ---------- drawing one frame at time t (seconds) ----------
+function star(ctx, x, y, r){
+  ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.quadraticCurveTo(x, y, x, y + r); ctx.quadraticCurveTo(x, y, x - r, y); ctx.quadraticCurveTo(x, y, x, y - r);
+  ctx.fill();
+}
+function drawFrame(ctx, t, T){
+  const s = scene;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.drawImage(bgCanvas, 0, 0);
+  if (!s){
+    ctx.fillStyle = '#f0c341'; ctx.font = 'bold 40px Arial, sans-serif';
+    ctx.fillText('Choose a product', VW / 2, VH / 2 - 30);
+    ctx.fillStyle = '#aaa'; ctx.font = 'bold 28px Arial, sans-serif';
+    ctx.fillText('from the Catalogue or upload a photo', VW / 2, VH / 2 + 20);
+    ctx.restore(); return;
+  }
+  // floating golden lights
+  s.bokeh.forEach(b => {
+    const y = ((b.y - t * b.sp) % 760 + 760) % 760;
+    ctx.globalAlpha = b.a * (0.75 + 0.25 * Math.sin(t * 1.3 + b.ph));
+    ctx.drawImage(bokehSprite, b.x - b.r, y - b.r, b.r * 2, b.r * 2);
+  });
+  ctx.globalAlpha = 1;
+
+  // header (crown + shop name)
+  if (s.shop){
+    const k = easeOut(prog(t, 0.1, 0.9));
+    ctx.globalAlpha = k; ctx.save(); ctx.translate(0, (1 - k) * -40);
+    adCrown(ctx, VW / 2, 48, 60);
+    adGoldText(ctx, s.shop.toUpperCase(), VW / 2, 118, 60, 'bold {s}px Georgia, "Times New Roman", serif', VW - 70);
+    ctx.strokeStyle = adGoldGradient(ctx, 160, 166); ctx.lineWidth = 3;
+    const lw = (VW / 2 - 90) * easeOut(prog(t, 0.5, 1.3));
+    ctx.beginPath(); ctx.moveTo(VW / 2 - lw, 168); ctx.lineTo(VW / 2 + lw, 168); ctx.stroke();
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+
+  // product
+  if (s.img){
+    const kin = easeOut(prog(t, 0.2, 1.4));
+    const push = 1 + 0.05 * clamp01((t - 1.4) / Math.max(1, T - 1.4));
+    const sc = (1.25 - 0.25 * kin) * push;
+    const cx = s.px + s.pw / 2, by = s.py + s.ph;
+    ctx.save();
+    ctx.globalAlpha = kin;
+    ctx.translate(cx, by); ctx.scale(sc, sc); ctx.translate(-cx, -by);
+    if (s.cut){
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.ellipse(cx, by - 4, s.pw * 0.46, 20, 0, 0, Math.PI * 2); ctx.fill();
+      // reflection
+      ctx.save(); ctx.globalAlpha = 0.16 * kin; ctx.translate(0, by * 2); ctx.scale(1, -1);
+      ctx.beginPath(); ctx.rect(s.px, by - 70, s.pw, 70); ctx.clip(); ctx.drawImage(s.img, s.px, s.py, s.pw, s.ph); ctx.restore();
+    }
+    ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 26;
+    ctx.drawImage(s.img, s.px, s.py, s.pw, s.ph);
+    ctx.shadowColor = 'transparent';
+    // shine sweep (only over the product)
+    [1.7, T * 0.62].forEach(st => {
+      const k = prog(t, st, st + 0.9);
+      if (k <= 0 || k >= 1) return;
+      const sh = document.createElement('canvas'); sh.width = Math.ceil(s.pw); sh.height = Math.ceil(s.ph);
+      const x = sh.getContext('2d');
+      x.drawImage(s.img, 0, 0, s.pw, s.ph);
+      x.globalCompositeOperation = 'source-atop';
+      const bx = -s.pw * 0.6 + (s.pw * 2.2) * k;
+      const g = x.createLinearGradient(bx - 55, 0, bx + 55, s.ph * 0.25);
+      g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.55)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      x.fillStyle = g; x.fillRect(0, 0, s.pw, s.ph);
+      ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.4;
+      ctx.drawImage(sh, s.px, s.py, s.pw, s.ph);
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = kin;
+    });
+    ctx.restore();
+    // twinkling sparkles
+    if (t > 1.5){
+      ctx.fillStyle = '#fff6d0';
+      s.sparkles.forEach(sp => {
+        const w = Math.sin((t - 1.5) * 2.4 + sp.p * 2.1);
+        if (w <= 0.2) return;
+        ctx.globalAlpha = (w - 0.2) / 0.8; star(ctx, sp.x, sp.y, sp.r * w);
+      });
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // height arrow (one size, cut-out product)
+  if (s.one && s.one.inch && s.cut){
+    const k = easeOut(prog(t, 4.2, 5.0));
+    if (k > 0){
+      const push = (1 + 0.05 * clamp01((t - 1.4) / Math.max(1, T - 1.4)));
+      const base = s.py + s.ph;
+      const ax = 690, top = base - (s.ph - 6) * push, bot = base - 6, mid = (top + bot) / 2;
+      const t2 = mid - (mid - top) * k, b2 = mid + (bot - mid) * k;
+      ctx.save(); ctx.globalAlpha = k; ctx.strokeStyle = '#f3e4c0'; ctx.fillStyle = '#f3e4c0'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(ax, t2); ctx.lineTo(ax, b2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ax, t2 - 2); ctx.lineTo(ax - 9, t2 + 16); ctx.lineTo(ax + 9, t2 + 16); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(ax, b2 + 2); ctx.lineTo(ax - 9, b2 - 16); ctx.lineTo(ax + 9, b2 - 16); ctx.fill();
+      ctx.translate(ax, mid); ctx.rotate(Math.PI / 2);
+      const label = s.one.inch + ' INCH';
+      ctx.font = 'bold 28px Arial, sans-serif'; const lw = ctx.measureText(label).width + 24;
+      ctx.fillStyle = '#0b0b0b'; ctx.fillRect(-lw / 2, -20, lw, 40); ctx.fillStyle = '#fff'; ctx.fillText(label, 0, 2);
+      ctx.restore();
+    }
+  }
+
+  // offer badge
+  {
+    const k = prog(t, 1.8, 2.5);
+    if (k > 0){
+      const pulse = t > 2.5 ? 1 + 0.035 * Math.sin((t - 2.5) * 5) : 1;
+      const sc = easeBack(k) * pulse;
+      const bx = 128, by = s.headerBottom + 135, br = 108;
+      ctx.save(); ctx.translate(bx, by); ctx.scale(sc, sc); ctx.rotate((1 - clamp01(k)) * -0.6);
+      ctx.shadowColor = 'rgba(255,200,80,0.55)'; ctx.shadowBlur = 30;
+      ctx.beginPath(); ctx.arc(0, 0, br, 0, Math.PI * 2); ctx.fillStyle = adGoldGradient(ctx, -br, br); ctx.fill();
+      ctx.shadowColor = 'transparent';
+      ctx.beginPath(); ctx.arc(0, 0, br - 12, 0, Math.PI * 2); ctx.fillStyle = '#0a0a0a'; ctx.fill();
+      adGoldText(ctx, s.pct + '%', 0, -38, 84, '900 {s}px Arial, sans-serif', 180);
+      ctx.font = '900 60px Arial, sans-serif'; ctx.lineWidth = 5; ctx.strokeStyle = '#222'; ctx.strokeText('OFF', 0, 26);
+      ctx.fillStyle = '#f2f2f2'; ctx.fillText('OFF', 0, 26);
+      ctx.rotate(-0.12); ctx.translate(0, 80);
+      ctx.fillStyle = '#8e0f12';
+      ctx.beginPath(); ctx.moveTo(-125, -8); ctx.lineTo(-148, 14); ctx.lineTo(-122, 36); ctx.lineTo(-108, 22); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(125, -8); ctx.lineTo(148, 14); ctx.lineTo(122, 36); ctx.lineTo(108, 22); ctx.fill();
+      const rg = ctx.createLinearGradient(0, -26, 0, 26); rg.addColorStop(0, '#ff3b3b'); rg.addColorStop(1, '#b3121a');
+      ctx.fillStyle = rg; adRoundRect(ctx, -122, -26, 244, 52, 8); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = '900 34px Arial, sans-serif'; ctx.fillText('ON MRP', 0, 2);
+      ctx.restore();
+    }
+  }
+
+  // info boxes
+  const slide = (k, fromLeft) => (1 - easeOut(k)) * (fromLeft ? -VW : VW);
+  let y = 790;
+  {
+    const k = prog(t, 2.6, 3.2);
+    if (k > 0){
+      ctx.save(); ctx.translate(slide(k, true), 0);
+      adInfoBox(ctx, 40, y, 640, 116);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 26px Arial, sans-serif'; ctx.fillText('MODEL NO.', VW / 2, y + 28);
+      adGoldText(ctx, (s.name || '-').toUpperCase(), VW / 2, y + 78, 56, '900 {s}px Arial, sans-serif', 600);
+      ctx.restore();
+    }
+  }
+  y += 134;
+  if (s.one){
+    const k1 = prog(t, 3.3, 3.9), k2 = prog(t, 3.6, 4.2);
+    if (k1 > 0){
+      ctx.save(); ctx.translate(slide(k1, true), 0);
+      adInfoBox(ctx, 40, y, 310, 132);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 26px Arial, sans-serif'; ctx.fillText('SIZE' + (s.one.code ? ' (' + s.one.code + ')' : ''), 195, y + 32);
+      adGoldPill(ctx, 56, y + 58, 278, 58, s.one.inch ? s.one.inch + ' INCH' : (s.one.code || '-'), 38);
+      ctx.restore();
+    }
+    if (k2 > 0){
+      ctx.save(); ctx.translate(slide(k2, false), 0);
+      adInfoBox(ctx, 370, y, 310, 132);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 26px Arial, sans-serif'; ctx.fillText('MRP:', 525, y + 32);
+      adGoldPill(ctx, 386, y + 58, 278, 58, s.one.price ? '₹' + s.one.price : '-', 44);
+      ctx.restore();
+    }
+  } else if (s.vars.length){
+    const many = s.vars.length > 4;
+    const rows = many ? s.vars.slice(0, 3) : s.vars;
+    const rowH = 42, bh = 48 + (rows.length + (many ? 1 : 0)) * rowH;
+    const k = prog(t, 3.3, 3.8);
+    if (k > 0){
+      ctx.save(); ctx.translate(slide(k, true), 0);
+      adInfoBox(ctx, 40, y, 640, bh);
+      ctx.fillStyle = '#c9c9c9'; ctx.font = 'bold 22px Arial, sans-serif';
+      ctx.fillText('SIZE', 150, y + 26); ctx.fillText('HEIGHT', 360, y + 26); ctx.fillText('MRP', 570, y + 26);
+      rows.forEach((v, i) => {
+        const kr = easeOut(prog(t, 3.7 + i * 0.35, 4.1 + i * 0.35));
+        if (kr <= 0) return;
+        const ry = y + 48 + i * rowH + rowH / 2;
+        ctx.globalAlpha = kr; ctx.font = 'bold 32px Arial, sans-serif';
+        ctx.fillStyle = '#f0c43f'; ctx.fillText(v.code || '-', 150, ry);
+        ctx.fillStyle = '#fff'; ctx.fillText(v.inch ? v.inch + '"' : '-', 360, ry);
+        ctx.fillStyle = '#f0c43f'; ctx.fillText(v.price ? '₹' + v.price : '-', 570, ry);
+      });
+      if (many && prog(t, 3.7 + 3 * 0.35, 4.1 + 3 * 0.35) > 0){
+        ctx.globalAlpha = 1; ctx.fillStyle = '#c9c9c9'; ctx.font = 'bold 24px Arial, sans-serif';
+        ctx.fillText('+ ' + (s.vars.length - 3) + ' more sizes', VW / 2, y + 48 + 3 * rowH + rowH / 2);
+      }
+      ctx.restore();
+    }
+  }
+
+  // bottom offer banner + phone
+  {
+    const st = Math.min(5.4, T - 3.5);
+    const k = easeOut(prog(t, st, st + 0.6));
+    if (k > 0){
+      const barH = 84, barY = (s.phone ? 1130 : 1160) + (1 - k) * 200;
+      const pulse = t > st + 0.6 ? 1 + 0.025 * Math.sin((t - st) * 4) : 1;
+      ctx.save(); ctx.translate(VW / 2, barY + barH / 2); ctx.scale(pulse, pulse); ctx.translate(-VW / 2, -(barY + barH / 2));
+      const g = ctx.createLinearGradient(0, barY, 0, barY + barH); g.addColorStop(0, '#ffe9a0'); g.addColorStop(0.5, '#f0c43f'); g.addColorStop(1, '#c99a22');
+      ctx.fillStyle = g; adRoundRect(ctx, 24, barY, VW - 48, barH, 14); ctx.fill();
+      ctx.fillStyle = '#111'; const txt = 'FLAT ' + s.pct + '% OFF ON MRP';
+      adFitText(ctx, txt, VW - 90, 52, '900'); ctx.fillText(txt, VW / 2, barY + barH / 2 + 2);
+      ctx.restore();
+      if (s.phone){
+        const k2 = easeOut(prog(t, st + 0.4, st + 1.0));
+        ctx.globalAlpha = k2; ctx.fillStyle = '#f0c43f'; ctx.font = 'bold 30px Arial, sans-serif';
+        ctx.fillText('Call / WhatsApp: ' + s.phone, VW / 2, 1250);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- live preview loop ----------
+function previewLoop(){
+  if (!recording){
+    const T = parseInt(fLen.value, 10) || 15;
+    const t = ((performance.now() - previewStart) / 1000) % (T + 1.5);
+    drawFrame(sctx, Math.min(t, T), T);
+  }
+  requestAnimationFrame(previewLoop);
+}
+
+// ---------- recording ----------
+function pickMime(withAudio){
+  const list = withAudio
+    ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  return list.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+}
+let resultBlob = null, resultName = '';
+document.getElementById('make-btn').onclick = async () => {
+  if (!scene){ alert('First choose a product from the Catalogue or upload a photo.'); return; }
+  if (!window.MediaRecorder || !stage.captureStream){ alert('This browser cannot make videos. Please open the app in Google Chrome.'); return; }
+  const T = parseInt(fLen.value, 10) || 15;
+  const makeBtn = document.getElementById('make-btn');
+  makeBtn.disabled = true; recording = true;
+  document.getElementById('result').style.display = 'none';
+  let wake = null; try { if (navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+  let audioCtx = null, src = null;
+  try {
+    const stream = stage.captureStream(30);
+    if (musicBlob){
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await audioCtx.decodeAudioData(await musicBlob.arrayBuffer());
+        src = audioCtx.createBufferSource(); src.buffer = buf; src.loop = true;
+        const gain = audioCtx.createGain(); const dest = audioCtx.createMediaStreamDestination();
+        src.connect(gain); gain.connect(dest);
+        const now = audioCtx.currentTime;
+        gain.gain.setValueAtTime(0, now); gain.gain.linearRampToValueAtTime(1, now + 0.6);
+        gain.gain.setValueAtTime(1, now + T - 1.2); gain.gain.linearRampToValueAtTime(0, now + T);
+        stream.addTrack(dest.stream.getAudioTracks()[0]);
+      } catch (e) { console.error(e); alert('The music file could not be used, so the video will be silent.'); audioCtx = null; src = null; }
+    }
+    const mime = pickMime(!!src);
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 6000000 } : { videoBitsPerSecond: 6000000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(res => { rec.onstop = res; });
+    drawFrame(sctx, 0, T);
+    barEl.style.display = 'block';
+    rec.start(250);
+    if (src) src.start();
+    const t0 = performance.now();
+    await new Promise(resolve => {
+      function tick(){
+        const t = (performance.now() - t0) / 1000;
+        drawFrame(sctx, Math.min(t, T), T);
+        barEl.firstElementChild.style.width = Math.round(Math.min(1, t / T) * 100) + '%';
+        statusEl.textContent = '🎬 Making video... ' + Math.min(T, Math.floor(t)) + ' / ' + T + ' sec';
+        if (t < T + 0.3) requestAnimationFrame(tick); else resolve();
+      }
+      requestAnimationFrame(tick);
+    });
+    rec.stop();
+    await stopped;
+    const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+    resultBlob = new Blob(chunks, { type });
+    const ext = type.includes('mp4') ? 'mp4' : 'webm';
+    const goodMp4 = ext === 'mp4' && /avc1/.test(mime);
+    resultName = ((scene.name || 'product').replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-reel.' + ext;
+    const v = document.getElementById('result-video');
+    v.src = URL.createObjectURL(resultBlob);
+    document.getElementById('result').style.display = '';
+    document.getElementById('result-note').textContent = goodMp4
+      ? '✅ MP4 video ready (' + (resultBlob.size / 1048576).toFixed(1) + ' MB) — share it to WhatsApp, Instagram Reels or Facebook.'
+      : '⚠️ Video ready (' + (resultBlob.size / 1048576).toFixed(1) + ' MB), but this browser could not make a standard MP4, so WhatsApp/Instagram may not accept it. Open this app in Google Chrome (update it from the Play Store) and make it again.';
+    statusEl.textContent = '✅ Video ready!';
+    setTimeout(() => document.getElementById('result').scrollIntoView({ behavior: 'smooth' }), 200);
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = '';
+    alert('Could not make the video: ' + (e && e.message ? e.message : e));
+  } finally {
+    try { if (src) src.stop(); } catch (e) {}
+    try { if (audioCtx) audioCtx.close(); } catch (e) {}
+    try { if (wake) wake.release(); } catch (e) {}
+    barEl.style.display = 'none';
+    recording = false; makeBtn.disabled = false;
+    previewStart = performance.now();
+  }
+};
+document.getElementById('dl-btn').onclick = () => {
+  if (!resultBlob) return;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(resultBlob); a.download = resultName;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+document.getElementById('share-btn').onclick = async () => {
+  if (!resultBlob) return;
+  const file = new File([resultBlob], resultName, { type: resultBlob.type });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: scene && scene.name }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  document.getElementById('dl-btn').onclick();
+  alert('Sharing is not available here, so the video was downloaded. Send it from your Gallery / Downloads.');
+};
+
+// ---------- start ----------
+makeStatics();
+renderVarRows();
+loadShopDefaults();
+loadMusic();
+loadCatalogueList();
+requestAnimationFrame(previewLoop);
+</script>
+
+</body>
+</html>
