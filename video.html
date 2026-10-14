@@ -583,6 +583,11 @@ function adGoldPill(ctx, x, y, w, h, text, size){
 
   <div class="card">
     <h2>3. Video settings</h2>
+    <label class="lb">Style</label>
+    <select id="f-style">
+      <option value="classic">✨ Classic — product with offer details</option>
+      <option value="reveal">🎭 Grand Reveal — cloth unveiling, close-up, then offer poster</option>
+    </select>
     <div class="row">
       <div><label class="lb">Length</label>
         <select id="f-len"><option value="10">10 seconds</option><option value="15" selected>15 seconds</option><option value="20">20 seconds</option></select></div>
@@ -729,6 +734,9 @@ const fName = document.getElementById('f-name'), fVars = document.getElementById
 const fPct = document.getElementById('f-pct'), fShop = document.getElementById('f-shop'), fPhone = document.getElementById('f-phone'), fLen = document.getElementById('f-len');
 fPct.value = lsGet('shopapp-ad-offer', '50');
 fLen.value = lsGet('shopapp-video-len', '15');
+const fStyle = document.getElementById('f-style');
+fStyle.value = lsGet('shopapp-video-style', 'classic') === 'reveal' ? 'reveal' : 'classic';
+fStyle.onchange = () => { lsSet('shopapp-video-style', fStyle.value); previewStart = performance.now(); };
 function setProduct(p){
   product = p;
   if (!product.variations.length) product.variations = [{ code: 'A', inch: '', price: '' }];
@@ -858,6 +866,14 @@ async function rebuildScene(){
   const rnd = adSeededRandom(product.fromId || 99);
   s.sparkles = Array.from({ length: 14 }, () => ({ x: s.px + rnd() * s.pw, y: s.py + rnd() * s.ph * 0.85, p: rnd() * 3, r: 8 + rnd() * 12 }));
   s.bokeh = Array.from({ length: 34 }, () => ({ x: rnd() * VW, y: rnd() * 760, r: 14 + rnd() * 40, a: 0.12 + rnd() * 0.3, sp: 6 + rnd() * 16, ph: rnd() * 6 }));
+  // Grand Reveal: the product big in the middle of a dark stage
+  if (s.img){
+    const box = { x: 70, y: 200, w: 580, h: 800 };
+    const sc2 = Math.min(box.w / s.pw, box.h / s.ph);
+    s.rw = s.pw * sc2; s.rh = s.ph * sc2;
+    s.rx = (VW - s.rw) / 2; s.ry = box.y + box.h - s.rh;
+  }
+  s.dust = Array.from({ length: 40 }, () => ({ x: 160 + rnd() * 400, y: rnd() * 1100, r: 2 + rnd() * 5, sp: 8 + rnd() * 20, ph: rnd() * 6 }));
   scene = s;
   statusEl.textContent = '';
   previewStart = performance.now();
@@ -870,6 +886,150 @@ function star(ctx, x, y, r){
   ctx.fill();
 }
 function drawFrame(ctx, t, T){
+  if (fStyle.value === 'reveal' && scene && scene.img) drawReveal(ctx, t, T);
+  else drawClassic(ctx, t, T);
+}
+
+// ---------- 🎭 Grand Reveal ----------
+function drawCloth(ctx, x, y, w, h, k, t){
+  // k: 0 = covering the product, 1 = pulled away
+  const e = k * k * (3 - 2 * k);
+  ctx.save();
+  ctx.globalAlpha = 1 - Math.pow(clamp01(k), 3);
+  const cx = x + w / 2;
+  ctx.translate(cx + e * 80, y + h * 0.15 - e * (h + 500));
+  ctx.rotate(e * 0.35);
+  ctx.scale(1 - e * 0.25, 1 + e * 0.2);
+  ctx.translate(-cx, -(y + h * 0.15));
+  const top = y - 40, bot = y + h + 22, l = x - 34, r = x + w + 34;
+  const sway = Math.sin(t * 2) * 6 * (1 - e);
+  ctx.beginPath();
+  ctx.moveTo(cx, top);
+  ctx.bezierCurveTo(cx + w * 0.38, top + 10, r - 10, y + h * 0.25, r + sway, bot);
+  for (let i = 6; i >= 0; i--){ const fx = l + (r - l) * (i / 6); ctx.quadraticCurveTo(fx + (r - l) / 12, bot + (i % 2 ? 18 : -6), fx, bot); }
+  ctx.bezierCurveTo(l + 10, y + h * 0.25, cx - w * 0.38, top + 10, cx, top);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(l, 0, r, 0);
+  for (let i = 0; i <= 8; i++){ const v = i % 2 ? 205 : 248; g.addColorStop(i / 8, 'rgb(' + v + ',' + v + ',' + (v + 2 > 255 ? 255 : v + 2) + ')'); }
+  ctx.fillStyle = g; ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 30; ctx.fill(); ctx.shadowColor = 'transparent';
+  const sh = ctx.createLinearGradient(0, top, 0, bot);
+  sh.addColorStop(0, 'rgba(255,255,255,0.25)'); sh.addColorStop(0.6, 'rgba(0,0,0,0)'); sh.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = sh; ctx.fill();
+  ctx.restore();
+}
+function drawStage(ctx, t, s, showDust){
+  ctx.fillStyle = '#030303'; ctx.fillRect(0, 0, VW, VH);
+  // light beam from above
+  const beam = ctx.createLinearGradient(0, 0, 0, 1080);
+  beam.addColorStop(0, 'rgba(255,236,190,0.22)'); beam.addColorStop(1, 'rgba(255,236,190,0.02)');
+  ctx.fillStyle = beam;
+  ctx.beginPath(); ctx.moveTo(VW / 2 - 70, -10); ctx.lineTo(VW / 2 + 70, -10); ctx.lineTo(VW / 2 + 330, 1060); ctx.lineTo(VW / 2 - 330, 1060); ctx.closePath(); ctx.fill();
+  // glowing floor spot
+  const fy = s.ry + s.rh;
+  const spot = ctx.createRadialGradient(VW / 2, fy, 10, VW / 2, fy, 360);
+  spot.addColorStop(0, 'rgba(255,225,160,0.35)'); spot.addColorStop(1, 'rgba(255,225,160,0)');
+  ctx.save(); ctx.translate(VW / 2, fy); ctx.scale(1, 0.22); ctx.translate(-VW / 2, -fy);
+  ctx.fillStyle = spot; ctx.beginPath(); ctx.arc(VW / 2, fy, 360, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  if (showDust){
+    s.dust.forEach(d => {
+      const y = ((d.y - t * d.sp) % 1100 + 1100) % 1100;
+      ctx.globalAlpha = 0.25 + 0.25 * Math.sin(t * 1.7 + d.ph);
+      ctx.drawImage(bokehSprite, d.x - d.r, y - d.r, d.r * 2, d.r * 2);
+    });
+    ctx.globalAlpha = 1;
+  }
+}
+function drawRevealProduct(ctx, t, s, shineAt){
+  if (s.cut){
+    const fy = s.ry + s.rh;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.beginPath(); ctx.ellipse(VW / 2, fy - 4, s.rw * 0.42, 22, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.save(); ctx.shadowColor = 'rgba(255,220,150,0.25)'; ctx.shadowBlur = 40;
+  ctx.drawImage(s.img, s.rx, s.ry, s.rw, s.rh); ctx.restore();
+  // moving highlight over the product
+  shineAt.forEach(([st, dur]) => {
+    const k = prog(t, st, st + dur);
+    if (k <= 0 || k >= 1) return;
+    const sh = document.createElement('canvas'); sh.width = Math.ceil(s.rw); sh.height = Math.ceil(s.rh);
+    const x = sh.getContext('2d');
+    x.drawImage(s.img, 0, 0, s.rw, s.rh);
+    x.globalCompositeOperation = 'source-atop';
+    const by = -s.rh * 0.3 + s.rh * 1.6 * k;
+    const g = x.createLinearGradient(0, by - 80, 0, by + 80);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.5)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = g; x.fillRect(0, 0, s.rw, s.rh);
+    ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.28;
+    ctx.drawImage(sh, s.rx, s.ry, s.rw, s.rh);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  });
+}
+function drawReveal(ctx, t, T){
+  const s = scene;
+  T = Math.max(10, T);
+  const revealStart = 1.0, revealEnd = 2.6;
+  const bEnd = T * 0.58, pullStart = bEnd - 1.6, cStart = bEnd + 0.15;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (t < cStart){
+    // camera: wide → close-up on the top → slow pan down → pull back
+    let zoom = 1, focusY = s.ry + s.rh / 2;
+    const topY = s.ry + s.rh * 0.22, lowY = s.ry + s.rh * 0.55;
+    if (t >= revealEnd + 0.4){
+      const kIn = easeOut(prog(t, revealEnd + 0.4, revealEnd + 1.4));
+      const kPan = prog(t, revealEnd + 1.4, pullStart);
+      const kOut = easeOut(prog(t, pullStart, bEnd - 0.2));
+      zoom = 1 + 1.15 * kIn * (1 - kOut);
+      const panY = topY + (lowY - topY) * (kPan * kPan * (3 - 2 * kPan));
+      focusY = (s.ry + s.rh / 2) + (panY - (s.ry + s.rh / 2)) * kIn * (1 - kOut);
+    } else {
+      zoom = 1 + 0.03 * Math.sin(t * 0.8);
+    }
+    ctx.save();
+    const zk = clamp01((zoom - 1) / 1.15);
+    const screenY = focusY + (VH * 0.5 - focusY) * zk;   // the point we look at drifts to the middle as we zoom
+    ctx.translate(VW / 2, screenY); ctx.scale(zoom, zoom); ctx.translate(-VW / 2, -focusY);
+    drawStage(ctx, t, s, true);
+    if (t >= revealStart) drawRevealProduct(ctx, t, s, [[revealEnd + 1.6, 1.4], [pullStart - 1.4, 1.2]]);
+    if (t < revealEnd + 0.1) drawCloth(ctx, s.rx, s.ry, s.rw, s.rh, prog(t, revealStart, revealEnd), t);
+    ctx.restore();
+    // flash + sparkles when the cloth comes off
+    const fk = prog(t, revealEnd - 0.5, revealEnd + 0.5);
+    if (fk > 0 && fk < 1){
+      ctx.fillStyle = 'rgba(255,240,200,' + (Math.sin(fk * Math.PI) * 0.55) + ')'; ctx.fillRect(0, 0, VW, VH);
+      ctx.fillStyle = '#fff6d0';
+      s.sparkles.forEach((sp, i) => {
+        const a = (i / s.sparkles.length) * Math.PI * 2, d = 60 + fk * 320;
+        ctx.globalAlpha = 1 - fk; star(ctx, VW / 2 + Math.cos(a) * d, s.ry + s.rh * 0.4 + Math.sin(a) * d, 10 + sp.r * (1 - fk));
+      });
+      ctx.globalAlpha = 1;
+    }
+    // intro text before the reveal
+    const it = prog(t, 0.1, 0.6) * (1 - prog(t, revealStart + 0.2, revealStart + 0.8));
+    if (it > 0){ ctx.globalAlpha = it; adGoldText(ctx, 'COMING SOON...', VW / 2, 120, 50, 'bold {s}px Georgia, "Times New Roman", serif', VW - 80); ctx.globalAlpha = 1; }
+    // "THE WAIT IS OVER" while the camera pulls back
+    const wt = easeOut(prog(t, pullStart + 0.9, pullStart + 1.5));
+    if (wt > 0){
+      ctx.globalAlpha = wt;
+      if (s.shop) adGoldText(ctx, s.shop.toUpperCase(), VW / 2, 92, 54, 'bold {s}px Georgia, "Times New Roman", serif', VW - 70);
+      ctx.save(); ctx.font = '900 46px Arial, sans-serif'; ctx.fillStyle = '#ffffff'; ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 12;
+      ctx.fillText('THE WAIT IS OVER.', VW / 2, s.shop ? 158 : 120); ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+    // fade to black before the poster
+    const fo = prog(t, bEnd - 0.35, cStart);
+    if (fo > 0){ ctx.fillStyle = 'rgba(0,0,0,' + fo + ')'; ctx.fillRect(0, 0, VW, VH); }
+  } else {
+    // offer poster (the Classic design builds up quickly)
+    const D = T - cStart;
+    const tc = 1.4 + clamp01((t - cStart) / (D * 0.8)) * 7.6;
+    drawClassic(ctx, tc, 9);
+    const fi = 1 - prog(t, cStart, cStart + 0.4);
+    if (fi > 0){ ctx.fillStyle = 'rgba(0,0,0,' + fi + ')'; ctx.fillRect(0, 0, VW, VH); }
+  }
+  ctx.restore();
+}
+
+function drawClassic(ctx, t, T){
   const s = scene;
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
