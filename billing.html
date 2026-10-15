@@ -1086,6 +1086,12 @@ window.__switchView = function(){};
     </div>
 
     <div class="field" style="margin-top:10px;">
+      <label>Old Balance (Rs.) — customer's earlier pending amount, optional</label>
+      <input type="number" id="old-balance-input" placeholder="0" min="0" inputmode="decimal">
+      <div id="old-balance-hint" style="display:none; margin-top:6px; font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; line-height:1.4;"></div>
+    </div>
+
+    <div class="field" style="margin-top:10px;">
       <label>Advance Received (Rs.) — optional</label>
       <input type="number" id="advance-input" placeholder="0" min="0" inputmode="decimal">
     </div>
@@ -1097,6 +1103,8 @@ window.__switchView = function(){};
       <div class="trow" id="gst-row" style="display:none;"><span id="gst-label">GST</span><span id="gst-display">+ Rs. 0</span></div>
       <div class="trow" id="roundoff-row" style="display:none;"><span>Round Off</span><span id="roundoff-display">Rs. 0</span></div>
       <div class="trow grand"><span>Grand Total</span><span id="total-display">Rs. 0</span></div>
+      <div class="trow" id="oldbal-row" style="display:none;"><span>Old Balance</span><span id="oldbal-display">+ Rs. 0</span></div>
+      <div class="trow grand" id="payable-row" style="display:none;"><span>Total Payable</span><span id="payable-display">Rs. 0</span></div>
       <div class="trow" id="advance-row" style="display:none;"><span>Advance Received</span><span id="advance-display">- Rs. 0</span></div>
       <div class="trow grand" id="balance-row" style="display:none; color:#e0705a;"><span id="balance-label">Balance Due</span><span id="balance-display">Rs. 0</span></div>
     </div>
@@ -1238,6 +1246,15 @@ const gstLabel = document.getElementById('gst-label');
 const gstDisplay = document.getElementById('gst-display');
 const totalDisplay = document.getElementById('total-display');
 const advanceInput = document.getElementById('advance-input');
+const oldBalanceInput = document.getElementById('old-balance-input');
+const oldBalanceHint = document.getElementById('old-balance-hint');
+const oldBalRow = document.getElementById('oldbal-row');
+const oldBalDisplay = document.getElementById('oldbal-display');
+const payableRow = document.getElementById('payable-row');
+const payableDisplay = document.getElementById('payable-display');
+// Old Balance + this bill − advance = what the customer still has to pay.
+function billOldBalance(bill){ return Math.max(0, parseFloat(bill && bill.oldBalance) || 0); }
+function billBalance(bill){ return Math.round(((parseFloat(bill.total) || 0) + billOldBalance(bill) - (parseFloat(bill.advance) || 0)) * 100) / 100; }
 const roundOffInput = document.getElementById('round-off-input');
 const roundOffRow = document.getElementById('roundoff-row');
 const roundOffDisplay = document.getElementById('roundoff-display');
@@ -1750,7 +1767,13 @@ function updateTotals(){
   // Advance is money already received — it never changes the Grand Total,
   // it just shows what's still left to collect.
   const advance = Math.max(0, Math.round((parseFloat(advanceInput.value) || 0) * 100) / 100);
-  const balance = Math.round((total - advance) * 100) / 100;
+  const oldBalance = Math.max(0, Math.round((parseFloat(oldBalanceInput.value) || 0) * 100) / 100);
+  const payable = Math.round((total + oldBalance) * 100) / 100;
+  const balance = Math.round((payable - advance) * 100) / 100;
+  oldBalRow.style.display = oldBalance > 0 ? 'flex' : 'none';
+  payableRow.style.display = oldBalance > 0 ? 'flex' : 'none';
+  oldBalDisplay.textContent = '+ ' + money(oldBalance);
+  payableDisplay.textContent = money(payable);
   if (advance > 0){
     advanceRow.style.display = 'flex';
     balanceRow.style.display = 'flex';
@@ -1763,9 +1786,33 @@ function updateTotals(){
     balanceRow.style.display = 'none';
   }
 
-  return { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff };
+  return { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff, oldBalance };
 }
 advanceInput.addEventListener('input', updateTotals);
+oldBalanceInput.addEventListener('input', updateTotals);
+// Suggest the customer's pending amount from their earlier unpaid bills.
+function updateOldBalanceHint(){
+  const name = customerNameInput.value.trim(), phone = customerPhoneInput.value.trim();
+  if (!name && !phone){ oldBalanceHint.style.display = 'none'; return; }
+  const key = customerKeyOf(name, phone);
+  let pending = 0, count = 0;
+  bills.forEach(b => {
+    if (b.paid || b.id === editingBillId) return;
+    if (customerKeyOf(b.customerName, b.customerPhone) !== key) return;
+    const due = Math.round(((parseFloat(b.total) || 0) - (parseFloat(b.advance) || 0)) * 100) / 100;
+    if (due > 0){ pending += due; count++; }
+  });
+  pending = Math.round(pending * 100) / 100;
+  if (pending <= 0){ oldBalanceHint.style.display = 'none'; return; }
+  oldBalanceHint.style.display = 'block';
+  oldBalanceHint.innerHTML = '💡 This customer has <b style="color:#e0705a;">' + money(pending) + '</b> pending on ' + count + ' earlier unpaid bill(s). ' +
+    '<button type="button" id="use-old-balance-btn" style="margin-left:4px; background:none; border:1.5px solid #f0c341; color:#f0c341; border-radius:5px; padding:4px 10px; font-weight:800; font-size:12px; cursor:pointer;">Use ' + money(pending) + '</button>';
+  document.getElementById('use-old-balance-btn').onclick = () => { oldBalanceInput.value = pending; updateTotals(); };
+}
+customerNameInput.addEventListener('input', () => setTimeout(updateOldBalanceHint, 0));
+customerPhoneInput.addEventListener('input', () => setTimeout(updateOldBalanceHint, 0));
+customerNameInput.addEventListener('change', () => setTimeout(updateOldBalanceHint, 0));
+customerPhoneInput.addEventListener('change', () => setTimeout(updateOldBalanceHint, 0));
 discountPercentInput.addEventListener('input', updateTotals);
 gstPercentInput.addEventListener('input', updateTotals);
 
@@ -1886,6 +1933,8 @@ function resetBillForm(nextInvoiceNoValue){
   packingOverrideInput.disabled = true;
   transportInput.value = '';
   advanceInput.value = '';
+  oldBalanceInput.value = '';
+  oldBalanceHint.style.display = 'none';
   roundOffInput.checked = roundOffDefault;
   productSearch.value = '';
   manualName.value = '';
@@ -1901,7 +1950,7 @@ let lastSavedMadeBy = null;
 saveBillBtn.addEventListener('click', async () => {
   if (billSaving) return; // ignore double-taps while a save is in progress
   if (currentItems.length === 0){ alert('Please add at least one item to the bill.'); return; }
-  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff } = updateTotals();
+  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff, oldBalance } = updateTotals();
   const prevBill = editingBillId ? (bills.find(b => b.id === editingBillId) || {}) : {};
 
   const bill = {
@@ -1926,6 +1975,7 @@ saveBillBtn.addEventListener('click', async () => {
     roundOffEnabled,
     roundOff,
     advance,
+    oldBalance,
     balance,
     // A bill whose advance covers the full total is marked Paid automatically.
     paid: !!prevBill.paid || (advance > 0 && balance <= 0),
@@ -2137,7 +2187,8 @@ function buildBillPDFDoc(bill){
   // Make sure the totals block + verification notice have room; if not, start a fresh page
   const pdfAdvance = parseFloat(bill.advance) || 0;
   const pdfRoundOff = parseFloat(bill.roundOff) || 0;
-  if (y + 105 + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
+  const pdfOld = billOldBalance(bill);
+  if (y + 105 + (pdfOld > 0 ? 14 : 0) + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
     doc.addPage();
     y = 20;
   }
@@ -2179,8 +2230,20 @@ function buildBillPDFDoc(bill){
   doc.text('Grand Total:', 130, y);
   doc.text('Rs. ' + String(Math.round(bill.total*100)/100), pageWidth-18, y, { align: 'right' });
 
+  if (pdfOld > 0){
+    y += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.text('Old Balance:', 130, y);
+    doc.text('+ ' + String(Math.round(pdfOld*100)/100), pageWidth-18, y, { align: 'right' });
+    y += 7;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text('Total Payable:', 130, y);
+    doc.text('Rs. ' + String(Math.round((bill.total + pdfOld)*100)/100), pageWidth-18, y, { align: 'right' });
+  }
   if (pdfAdvance > 0){
-    const pdfBalance = Math.round((bill.total - pdfAdvance) * 100) / 100;
+    const pdfBalance = billBalance(bill);
     y += 7;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
@@ -2252,9 +2315,9 @@ function buildBillPDFDoc(bill){
 }
 
 function buildCurrentDraftBill(){
-  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff } = updateTotals();
+  const { subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total, advance, balance, roundOffEnabled, roundOff, oldBalance } = updateTotals();
   return {
-    advance, balance, roundOffEnabled, roundOff,
+    advance, balance, roundOffEnabled, roundOff, oldBalance,
     invoiceNo: parseInt(invoiceNoInput.value, 10) || 1,
     date: billDateInput.value || todayStr(),
     customerName: customerNameInput.value.trim(),
@@ -2300,9 +2363,14 @@ function buildEstimateText(bill){
   if (bill.gstEnabled && bill.gstAmount) lines.push('GST (' + bill.gstPercent + '%): + ' + r(bill.gstAmount));
   if (parseFloat(bill.roundOff)) lines.push('Round Off: ' + (bill.roundOff > 0 ? '+ ' : '- ') + r(Math.abs(bill.roundOff)));
   lines.push('*Grand Total: ' + r(bill.total) + '*');
+  const oldB = billOldBalance(bill);
+  if (oldB > 0){
+    lines.push('Old Balance: + ' + r(oldB));
+    lines.push('*Total Payable: ' + r(Math.round((bill.total + oldB) * 100) / 100) + '*');
+  }
   const adv = parseFloat(bill.advance) || 0;
   if (adv > 0){
-    const bal = Math.round((bill.total - adv) * 100) / 100;
+    const bal = billBalance(bill);
     lines.push('Advance Received: - ' + r(adv));
     lines.push(bal < 0 ? '*Excess Paid: ' + r(-bal) + '*' : (bal === 0 ? '*Fully Paid ✅*' : '*Balance Due: ' + r(bal) + '*'));
   }
@@ -2503,6 +2571,7 @@ function renderCustomerPickerResults(){
       customerPickerSearch.value = '';
       customerPickerResults.innerHTML = '';
       billStatusMsg.textContent = 'Loaded saved details for ' + (c.name || 'this customer') + '.';
+      updateOldBalanceHint();
     });
     customerPickerResults.appendChild(div);
   });
@@ -2534,8 +2603,9 @@ function renderBillsList(){
         <span class="amt">${money(bill.total)}</span>
       </div>
       <div class="meta">${escapeHtml(bill.customerName || 'Walk-in customer')} — ${bill.items.length} item(s)</div>
+      ${billOldBalance(bill) > 0 ? `<div class="meta" style="margin-top:2px;">Old balance: ${money(billOldBalance(bill))} · Total payable: ${money(Math.round((bill.total + billOldBalance(bill)) * 100) / 100)}</div>` : ''}
       ${(parseFloat(bill.advance) || 0) > 0 ? (() => {
-        const bal = Math.round((bill.total - bill.advance) * 100) / 100;
+        const bal = billBalance(bill);
         return `<div class="meta" style="margin-top:2px;">Advance: ${money(bill.advance)} · <span style="font-weight:800; color:${bal > 0 ? '#e0705a' : '#7cd992'};">${bal < 0 ? 'Excess paid: ' + money(-bal) : (bal === 0 ? 'Fully paid' : 'Balance: ' + money(bal))}</span></div>`;
       })() : ''}
       <div class="phone">📅 ${escapeHtml(formatDateDMY(bill.date))}</div>
@@ -2599,6 +2669,8 @@ function renderBillsList(){
       packingOverrideInput.value = (bill.packing !== undefined) ? bill.packing : 0;
       transportInput.value = bill.transportName || '';
       advanceInput.value = bill.advance ? bill.advance : '';
+      oldBalanceInput.value = billOldBalance(bill) ? bill.oldBalance : '';
+      updateOldBalanceHint();
       roundOffInput.checked = !!bill.roundOffEnabled; // bills from before this option keep their exact total
       billFormTitle.textContent = 'Editing Invoice #' + bill.invoiceNo;
       renderBillItems();
