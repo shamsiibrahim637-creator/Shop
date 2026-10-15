@@ -544,7 +544,7 @@ function adGoldPill(ctx, x, y, w, h, text, size){
 
 <div class="wrap">
   <h1>🎬 Video Maker</h1>
-  <p class="sub">Make a Reel (9:16) for your product — photo, offer badge, model, sizes &amp; MRP, with animation and music. <span style="color:#7cd992;">Version 3 · Grand Reveal</span></p>
+  <p class="sub">Make a Reel (9:16) for your product — photo, offer badge, model, sizes &amp; MRP, with animation and music. <span style="color:#7cd992;">Version 4 · Grand Reveal</span></p>
 
   <div class="card">
     <h2>1. Choose product</h2>
@@ -1419,7 +1419,7 @@ document.getElementById('make-btn').onclick = async () => {
     v.src = URL.createObjectURL(blob);
     document.getElementById('result').style.display = '';
     document.getElementById('result-note').textContent = goodMp4
-      ? '✅ ' + T + '-second MP4 video ready (' + (blob.size / 1048576).toFixed(1) + ' MB) — share it to WhatsApp, Instagram Reels or Facebook.'
+      ? '✅ ' + (fStyle.value === 'reveal' ? '🎭 Grand Reveal' : '✨ Classic') + ' — ' + T + '-second MP4 video ready (' + (blob.size / 1048576).toFixed(1) + ' MB) — share it to WhatsApp, Instagram Reels or Facebook.'
       : '⚠️ Video ready (' + (blob.size / 1048576).toFixed(1) + ' MB), but this browser could not make a standard MP4, so WhatsApp/Instagram may not accept it. Open this app in Google Chrome (update it from the Play Store) and make it again.';
     statusEl.textContent = '✅ Video ready!';
     setTimeout(() => document.getElementById('result').scrollIntoView({ behavior: 'smooth' }), 200);
