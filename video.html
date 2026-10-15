@@ -544,7 +544,7 @@ function adGoldPill(ctx, x, y, w, h, text, size){
 
 <div class="wrap">
   <h1>🎬 Video Maker</h1>
-  <p class="sub">Make a Reel (9:16) for your product — photo, offer badge, model, sizes &amp; MRP, with animation and music.</p>
+  <p class="sub">Make a Reel (9:16) for your product — photo, offer badge, model, sizes &amp; MRP, with animation and music. <span style="color:#7cd992;">Version 3 · Grand Reveal</span></p>
 
   <div class="card">
     <h2>1. Choose product</h2>
@@ -584,10 +584,15 @@ function adGoldPill(ctx, x, y, w, h, text, size){
   <div class="card">
     <h2>3. Video settings</h2>
     <label class="lb">Style</label>
-    <select id="f-style">
-      <option value="classic">✨ Classic — product with offer details</option>
-      <option value="reveal">🎭 Grand Reveal — cloth unveiling, close-up, then offer poster</option>
+    <div class="tabs" style="margin-bottom:4px;">
+      <button type="button" class="tab" id="style-classic">✨ Classic</button>
+      <button type="button" class="tab" id="style-reveal">🎭 Grand Reveal</button>
+    </div>
+    <select id="f-style" style="display:none;">
+      <option value="classic">Classic</option>
+      <option value="reveal">Grand Reveal</option>
     </select>
+    <p class="hint" id="style-hint"></p>
     <div class="row">
       <div><label class="lb">Length</label>
         <select id="f-len"><option value="10">10 seconds</option><option value="15" selected>15 seconds</option><option value="20">20 seconds</option></select></div>
@@ -736,7 +741,18 @@ fPct.value = lsGet('shopapp-ad-offer', '50');
 fLen.value = lsGet('shopapp-video-len', '15');
 const fStyle = document.getElementById('f-style');
 fStyle.value = lsGet('shopapp-video-style', 'classic') === 'reveal' ? 'reveal' : 'classic';
-fStyle.onchange = () => { lsSet('shopapp-video-style', fStyle.value); previewStart = performance.now(); };
+function setStyle(v){
+  fStyle.value = v; lsSet('shopapp-video-style', v); previewStart = performance.now();
+  document.getElementById('style-classic').classList.toggle('active', v === 'classic');
+  document.getElementById('style-reveal').classList.toggle('active', v === 'reveal');
+  document.getElementById('style-hint').textContent = v === 'reveal'
+    ? '🎭 White cloth is pulled off the product under a spotlight, camera close-up, then the offer poster. Best with 15 or 20 seconds.'
+    : '✨ Product with offer badge, model, sizes and MRP animating in.';
+}
+fStyle.onchange = () => setStyle(fStyle.value);
+document.getElementById('style-classic').onclick = () => setStyle('classic');
+document.getElementById('style-reveal').onclick = () => setStyle('reveal');
+setStyle(fStyle.value);
 function setProduct(p){
   product = p;
   if (!product.variations.length) product.variations = [{ code: 'A', inch: '', price: '' }];
