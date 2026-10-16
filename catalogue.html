@@ -2057,6 +2057,9 @@ function comboDefaultSource(){
 }
 function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^0-9.]/g, '')) || 0; }
 function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
+function comboInchKey(p){ return 'shopapp-combo-inch:' + p.catId + ':' + p.item.id + ':' + (p.v.code || ''); }
+// Real height of a part: what you typed in the Combo Maker, else the size's inch in the catalogue
+function comboPartInch(p){ const o = parseFloat(comboLs(comboInchKey(p), '')); return o > 0 ? o : comboInch(p.v); }
 
 // ---- AI background removal (runs on the phone; the AI is downloaded once) ----
 // Tried in order; the first one that loads is used.
@@ -2118,11 +2121,14 @@ async function smartCutout(dataUrl, key, onStatus){
   const url = URL.createObjectURL(blob);
   const im = await adLoadImage(url);
   if (!im) return null;
-  let src2 = im;
+  // 1) drop the reflection (using the AI's own see-through edges), 2) then fill gaps in the middle
+  const raw = document.createElement('canvas'); raw.width = im.naturalWidth; raw.height = im.naturalHeight;
+  raw.getContext('2d').drawImage(im, 0, 0);
+  let src2 = cutReflection(raw);
   const keepMiddle = !comboModal || !comboModal.querySelector('.cm-fill') || comboModal.querySelector('.cm-fill').checked;
   if (keepMiddle){
     const orig = await adLoadImage(dataUrl);
-    if (orig) src2 = fillEnclosedHoles(im, orig) || im;
+    if (orig) src2 = fillEnclosedHoles(src2, orig) || src2;
   }
   const cut = trimTransparent(src2);
   if (cut) smartCutCache.set(fingerprint + (keepMiddle ? ':fill' : ''), cut);
@@ -2136,7 +2142,7 @@ function fillEnclosedHoles(cutImg, origImg){
   const c = document.createElement('canvas'); c.width = w; c.height = h;
   const x = c.getContext('2d'); x.drawImage(cutImg, 0, 0);
   const o = document.createElement('canvas'); o.width = w; o.height = h;
-  o.getContext('2d').drawImage(origImg, 0, 0, w, h);
+  o.getContext('2d').drawImage(origImg, 0, 0, w, h, 0, 0, w, h);
   let cd, od;
   try { cd = x.getImageData(0, 0, w, h); od = o.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return null; }
   const d = cd.data, N = w * h;
@@ -2209,9 +2215,9 @@ function openComboMaker(){
           <div class="cm-aiinfo" style="text-align:center; color:#8a8a8a; font-size:12px; margin-top:6px;"></div>
           <div style="margin-top:10px; font-size:13px; font-weight:700;">
             <label style="display:block;">⬆⬇ Trophy up / down <span class="cm-lift-v" style="color:#f0c341;"></span></label>
-            <input type="range" class="cm-lift" min="-30" max="30" step="1" value="0" style="width:100%;">
+            <input type="range" class="cm-lift" min="-60" max="60" step="1" value="0" style="width:100%;">
             <label style="display:block; margin-top:6px;">🔍 Trophy size <span class="cm-grow-v" style="color:#f0c341;"></span></label>
-            <input type="range" class="cm-grow" min="60" max="140" step="1" value="100" style="width:100%;">
+            <input type="range" class="cm-grow" min="40" max="250" step="1" value="100" style="width:100%;">
             <button type="button" class="cm-reset-adj" style="margin-top:6px; background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:6px 12px; font-weight:800; font-size:12px;">Reset position</button>
           </div>
         </div>
@@ -2316,13 +2322,21 @@ function comboRenderParts(){
       <div style="flex:1; min-width:0;">
         <div style="font-size:11px; font-weight:800; color:#a9a9a9; letter-spacing:0.5px;">${escapeHtml(comboPartLabel(i, n))}</div>
         <div style="font-size:15px; font-weight:800; color:#fff; margin-top:2px;">${p ? escapeHtml(p.item.name) + ' — Size ' + escapeHtml(p.v.code || '-') : 'Not chosen yet'}</div>
-        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">${p.v.inch ? escapeHtml(p.v.inch) + '" · ' : ''}MRP ₹${comboPrice(p.v)}</div>` : ''}
+        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}</div>
+        <div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; font-weight:700; color:${comboPartInch(p) ? '#c9c9c9' : '#e0705a'};">Real height <input type="number" class="cm-pinch" inputmode="decimal" value="${comboPartInch(p) || ''}" placeholder="?" style="width:62px; padding:5px; border-radius:5px; border:1.5px solid ${comboPartInch(p) ? '#555' : '#e0705a'}; background:#0b0b0b; color:#fff; font-weight:800; font-size:13px; text-align:center;"> inch${comboPartInch(p) ? '' : ' ⚠️ enter it'}</div>` : ''}
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
         <button type="button" class="cm-choose" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:8px 10px; font-weight:800; font-size:12px;">${p ? 'Change' : 'Choose'}</button>
         ${n > 2 ? '<button type="button" class="cm-remove" style="background:none; color:#e0705a; border:1.5px solid #e0705a; border-radius:6px; padding:6px 10px; font-weight:800; font-size:12px;">Remove</button>' : ''}
       </div>`;
     row.querySelector('.cm-choose').onclick = () => comboOpenPicker(i);
+    const pin = row.querySelector('.cm-pinch');
+    if (pin) pin.onchange = () => {
+      const v = parseFloat(pin.value);
+      comboLsSet(comboInchKey(p), v > 0 ? String(v) : '');
+      (comboState.layers || []).forEach(l => { if (l.part === p) l.inch = comboPartInch(p); });
+      comboRenderParts(); comboDraw();
+    };
     const rm = row.querySelector('.cm-remove'); if (rm) rm.onclick = () => { comboState.parts.splice(i, 1); comboRenderParts(); comboRebuild(); };
     box.appendChild(row);
   });
@@ -2400,7 +2414,7 @@ function comboCalc(keepUserMrp){
   comboState.mrp = mrp;
   q('.cm-mrp').value = parts.length ? mrp : '';
   // default name / height
-  const inch = parts.reduce((a, p) => a + comboInch(p.v), 0);
+  const inch = parts.reduce((a, p) => a + comboPartInch(p), 0);
   q('.cm-inch').value = inch ? String(Math.round(inch * 100) / 100) : '';
   if (!q('.cm-name').dataset.touched) q('.cm-name').value = parts.map(p => p.item.name + (p.v.code ? '-' + p.v.code : '')).join(' + ');
   if (!q('.cm-code').value) q('.cm-code').value = 'A';
@@ -2427,7 +2441,7 @@ async function comboRebuild(){
     }
     let method = cut ? 'cut out' : 'NOT cut out';
     if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
-    layers.push({ cut, inch: comboInch(p.v) || 0, info: p.item.name + ': ' + method });
+    layers.push({ cut, part: p, inch: comboPartInch(p) || 0, info: p.item.name + ': ' + method });
   }
   if (my !== comboRunId) return;
   comboState.layers = layers;
@@ -2442,14 +2456,14 @@ function cutReflection(cv){
   const w = cv.width, h = cv.height;
   let d;
   try { d = cv.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return cv; }
-  const solidRow = (y) => {
+  // The AI keeps the mirror reflection under the product as see-through
+  // pixels; the product itself is solid. Find the lowest solid rows.
+  const step = Math.max(1, Math.round(w / 300));
+  let bottom = h - 1;
+  for (let y = h - 1, run = 0; y > h * 0.35; y--){
     let any = 0, strong = 0;
-    for (let x = 0; x < w; x++){ const a = d[(y * w + x) * 4 + 3]; if (a > 20){ any++; if (a > 225) strong++; } }
-    return any > 0 && strong >= 4 && strong / any > 0.6;
-  };
-  let bottom = h - 1, run = 0;
-  for (let y = h - 1; y > h * 0.4; y--){
-    if (solidRow(y)){ run++; if (run >= 3){ bottom = y + 2; break; } } else run = 0;
+    for (let x = 0; x < w; x += step){ const a = d[(y * w + x) * 4 + 3]; if (a > 20){ any++; if (a > 200) strong++; } }
+    if (any > 0 && strong >= 2 && strong / any > 0.7){ if (++run >= 3){ bottom = y + 2; break; } } else run = 0;
   }
   if (bottom >= h - 3) return cv;
   const t = document.createElement('canvas'); t.width = w; t.height = bottom + 1;
