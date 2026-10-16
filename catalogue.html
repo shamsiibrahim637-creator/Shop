@@ -2160,6 +2160,13 @@ function openComboMaker(){
           <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:800; font-size:14px; margin:0 0 8px; line-height:1.4;"></div>
           <img class="cm-preview" style="width:100%; max-width:360px; display:block; margin:0 auto; border-radius:8px; background:#fff; min-height:120px;">
           <div class="cm-aiinfo" style="text-align:center; color:#8a8a8a; font-size:12px; margin-top:6px;"></div>
+          <div style="margin-top:10px; font-size:13px; font-weight:700;">
+            <label style="display:block;">⬆⬇ Trophy up / down <span class="cm-lift-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-lift" min="-30" max="30" step="1" value="0" style="width:100%;">
+            <label style="display:block; margin-top:6px;">🔍 Trophy size <span class="cm-grow-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-grow" min="60" max="140" step="1" value="100" style="width:100%;">
+            <button type="button" class="cm-reset-adj" style="margin-top:6px; background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:6px 12px; font-weight:800; font-size:12px;">Reset position</button>
+          </div>
         </div>
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
@@ -2197,6 +2204,11 @@ function openComboMaker(){
     [['.cm-less', 'shopapp-combo-less'], ['.cm-margin', 'shopapp-combo-margin'], ['.cm-cust', 'shopapp-combo-cust']].forEach(([sel, key]) => {
       q(sel).oninput = () => { comboLsSet(key, q(sel).value); comboCalc(true); };
     });
+    const adjLabels = () => { q('.cm-lift-v').textContent = (q('.cm-lift').value > 0 ? '+' : '') + q('.cm-lift').value; q('.cm-grow-v').textContent = q('.cm-grow').value + '%'; };
+    q('.cm-lift').oninput = () => { adjLabels(); comboDraw(); };
+    q('.cm-grow').oninput = () => { adjLabels(); comboDraw(); };
+    q('.cm-reset-adj').onclick = () => { q('.cm-lift').value = 0; q('.cm-grow').value = 100; adjLabels(); comboDraw(); };
+    adjLabels();
     q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
     q('.cm-ai').onchange = () => { comboLsSet('shopapp-combo-ai', q('.cm-ai').checked ? '1' : '0'); comboRebuild(); };
     q('.cm-rod').oninput = () => comboCalc(true);
@@ -2369,30 +2381,65 @@ async function comboRebuild(){
     layers.push({ cut, inch: comboInch(p.v) || 0, info: p.item.name + ': ' + method });
   }
   if (my !== comboRunId) return;
+  comboState.layers = layers;
+  if (!comboAiError) q('.cm-pstatus').textContent = '';
+  q('.cm-aiinfo').textContent = layers.map(l => l.info).join(' · ') + (q('.cm-ai').checked ? '' : ' · (AI is switched off)');
+  comboDraw();
+}
+// Removes the faint mirror-reflection under a cut-out product (AI keeps it,
+// so the trophy would float above the base). Real product rows are almost
+// fully solid; reflection rows are see-through.
+function cutReflection(cv){
+  const w = cv.width, h = cv.height;
+  let d;
+  try { d = cv.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return cv; }
+  const solidRow = (y) => {
+    let any = 0, strong = 0;
+    for (let x = 0; x < w; x++){ const a = d[(y * w + x) * 4 + 3]; if (a > 20){ any++; if (a > 225) strong++; } }
+    return any > 0 && strong >= 4 && strong / any > 0.6;
+  };
+  let bottom = h - 1, run = 0;
+  for (let y = h - 1; y > h * 0.4; y--){
+    if (solidRow(y)){ run++; if (run >= 3){ bottom = y + 2; break; } } else run = 0;
+  }
+  if (bottom >= h - 3) return cv;
+  const t = document.createElement('canvas'); t.width = w; t.height = bottom + 1;
+  t.getContext('2d').drawImage(cv, 0, 0, w, bottom + 1, 0, 0, w, bottom + 1);
+  return t;
+}
+window.__comboTest = { cutReflection: (c) => cutReflection(c) };
+function comboDraw(){
+  const q = (s) => comboModal.querySelector(s);
+  const layers = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
+  if (!layers.length) return;
+  const lift = (parseFloat(q('.cm-lift').value) || 0) / 100;   // top part up(+)/down(−), share of the part below
+  const grow = (parseFloat(q('.cm-grow').value) || 100) / 100; // top part size
   // heights: by inches when known, else by the photo's own proportion
   const known = layers.filter(l => l.inch > 0);
   const avgPxPerInch = known.length ? known.reduce((a, l) => a + l.cut.height / l.inch, 0) / known.length : 0;
   layers.forEach(l => { l.h = l.inch > 0 ? l.inch : (avgPxPerInch ? l.cut.height / avgPxPerInch : 4); });
-  const W = 1000, H = 1300, M = 60, sink = 0.08; // upper part sits slightly into the top face of the part below
-  const totalIn = layers.reduce((a, l, i) => a + l.h * (i > 0 ? 1 - sink : 1), 0);
-  let k = (H - 2 * M) / totalIn;
+  if (layers.length > 1) layers[0].h *= grow;
+  const W = 1000, H = 1300, M = 60, sink = 0.06; // upper part stands slightly into the top face of the part below
+  const totalIn = layers.reduce((a, l, i) => a + (i === layers.length - 1 ? l.h : 0), 0) +
+    layers.slice(0, -1).reduce((a, l, i) => a + l.h, 0) - layers.slice(1).reduce((a, l, i) => a + l.h * (i === 0 ? sink - lift : sink), 0);
+  // scale is worked out without the up/down nudge, so moving the trophy never resizes everything
+  const totalNoLift = totalIn - (layers.length > 1 ? layers[1].h * lift : 0);
+  let k = (H - 2 * M) / Math.max(1, totalNoLift);
   layers.forEach(l => { const w = l.cut.width * (l.h * k) / l.cut.height; if (w > W - 2 * M) k = Math.min(k, (W - 2 * M) * l.cut.height / (l.cut.width * l.h)); });
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const ctx = c.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
-  const stackH = totalIn * k;
-  let bottom = (H + stackH) / 2;
-  // soft shadow under the base
-  const baseW = layers[layers.length - 1].cut.width * (layers[layers.length - 1].h * k) / layers[layers.length - 1].cut.height;
+  let bottom = (H + totalIn * k) / 2;
+  const last = layers[layers.length - 1];
+  const baseW = last.cut.width * (last.h * k) / last.cut.height;
   ctx.fillStyle = 'rgba(0,0,0,0.12)'; ctx.beginPath(); ctx.ellipse(W / 2, bottom - 4, baseW * 0.5, 16, 0, 0, Math.PI * 2); ctx.fill();
   for (let i = layers.length - 1; i >= 0; i--){
     const l = layers[i]; const h = l.h * k; const w = l.cut.width * h / l.cut.height;
     ctx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
-    bottom = bottom - h * (1 - sink);
+    const s2 = (i === 1) ? sink - lift : sink;   // joint between part 1 (top) and part 2
+    bottom = bottom - h * (1 - s2);
   }
   comboImage = c.toDataURL('image/jpeg', 0.9);
   q('.cm-preview').src = comboImage;
-  if (!comboAiError) q('.cm-pstatus').textContent = '';
-  q('.cm-aiinfo').textContent = layers.map(l => l.info).join(' · ') + (q('.cm-ai').checked ? '' : ' · (AI is switched off)');
 }
 async function comboSave(){
   const q = (s) => comboModal.querySelector(s);
