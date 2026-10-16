@@ -941,6 +941,7 @@ window.__switchView = function(){};
       <button type="button" id="rename-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#c9c9c9; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">✎ Rename</button>
       <button type="button" id="delete-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#e0705a; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">🗑 Delete</button>
     </div>
+    <button type="button" id="combo-maker-btn" style="width:100%; margin-top:10px; background:linear-gradient(180deg,#ffe9a0,#f0c43f 55%,#c99a22); border:none; color:#000; padding:13px; border-radius:6px; font-family:Arial,sans-serif; font-size:15px; font-weight:800; cursor:pointer;">🧩 Combo Maker — make products from loose parts</button>
     <div id="tag-row" style="margin-top:12px; font-family:Arial,sans-serif;">
       <div style="font-size:13px; font-weight:700; color:#c9c9c9; margin-bottom:6px;">🏷 Colour tag for this catalogue <span style="font-weight:400; color:#8a8a8a;">(shows on every product, in PDFs and in Billing)</span></div>
       <div id="tag-chips" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
@@ -1093,6 +1094,7 @@ const catalogueSelect = document.getElementById('catalogue-select');
 const headerSubtitle = document.getElementById('header-subtitle');
 const newCatalogueBtn = document.getElementById('new-catalogue-btn');
 const renameCatalogueBtn = document.getElementById('rename-catalogue-btn');
+document.getElementById('combo-maker-btn').addEventListener('click', () => openComboMaker());
 const deleteCatalogueBtn = document.getElementById('delete-catalogue-btn');
 const catalogueNameRow = document.getElementById('catalogue-name-row');
 const catalogueNameInput = document.getElementById('catalogue-name-input');
@@ -2029,6 +2031,331 @@ function openAdMaker(item){
     alert('Sharing is not available here, so the image was downloaded. Send it from your Gallery/Downloads.');
   };
   render();
+}
+
+// ===================== 🧩 Combo Maker =====================
+// Build a ready product from loose parts (e.g. statue 5579-C on a base):
+// joins the photos, adds up the height, and works out the MRP from the
+// loose-catalogue MRPs: cost = MRP − purchase discount, + your margin,
+// then MRP is set so that after the customer discount you get that price.
+const comboState = { parts: [null, null], src: '', cache: {} };
+let comboModal = null;
+const comboLs = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
+const comboLsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+
+async function comboLoadCatalogueItems(catId){
+  if (comboState.cache[catId]) return comboState.cache[catId];
+  const idx = await storage.get(indexKey(catId));
+  const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+  const list = (await Promise.all(ids.map(id => storage.get(itemKey(catId, id)).then(r => (r && r.value ? JSON.parse(r.value) : null)).catch(() => null)))).filter(Boolean);
+  comboState.cache[catId] = list;
+  return list;
+}
+function comboDefaultSource(){
+  const loose = catalogues.find(c => /loose/i.test(c.name)) || catalogues.find(c => c.tagColor) || catalogues[0];
+  return comboLs('shopapp-combo-src', '') && catalogues.some(c => c.id === comboLs('shopapp-combo-src', '')) ? comboLs('shopapp-combo-src', '') : (loose ? loose.id : '');
+}
+function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^0-9.]/g, '')) || 0; }
+function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
+
+function openComboMaker(){
+  if (!comboModal){
+    comboModal = document.createElement('div');
+    comboModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); overflow:auto; padding:14px; font-family:Arial,sans-serif; color:#f2e8cf;';
+    const inp = 'width:100%; box-sizing:border-box; padding:10px; border-radius:6px; border:1.5px solid #3a3a3a; background:#0b0b0b; color:#fff; font-weight:700; font-size:15px;';
+    comboModal.innerHTML = `
+      <div style="max-width:520px; margin:0 auto;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+          <h2 style="flex:1; margin:0; font-family:Georgia,serif; color:#f0c341; font-size:22px;">🧩 Combo Maker</h2>
+          <button type="button" class="cm-close" style="background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:8px 14px; font-weight:800;">✕ Close</button>
+        </div>
+        <p style="color:#a9a9a9; font-size:13px; margin:0 0 12px; line-height:1.4;">Pick the parts from your loose catalogue — top part first (statue / figure), then the base. The app joins the photos, adds up the height and works out the MRP.</p>
+        <label style="font-size:12px; font-weight:700; color:#a9a9a9;">Take parts from catalogue</label>
+        <select class="cm-src" style="${inp} margin:4px 0 12px;"></select>
+        <div class="cm-parts"></div>
+        <button type="button" class="cm-addpart" style="width:100%; padding:10px; border-radius:8px; border:1.5px dashed #b8912f; background:none; color:#f0c341; font-weight:800; font-size:14px; margin-bottom:12px;">+ Add another part</button>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PRICE CALCULATION</div>
+          <div style="display:flex; gap:8px;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Less on loose MRP %</label><input type="number" class="cm-less" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Your margin %</label><input type="number" class="cm-margin" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Customer discount %</label><input type="number" class="cm-cust" style="${inp}" inputmode="decimal"></div>
+          </div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:13px; font-weight:700;"><input type="checkbox" class="cm-round" style="width:18px; height:18px;"> Round MRP up to the next ₹10</label>
+          <div class="cm-calc" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
+        </div>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PREVIEW</div>
+          <img class="cm-preview" style="width:100%; max-width:360px; display:block; margin:0 auto; border-radius:8px; background:#fff; min-height:120px;">
+          <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:700; font-size:13px; margin-top:6px;"></div>
+        </div>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">SAVE AS PRODUCT</div>
+          <label style="font-size:11px; color:#a9a9a9; font-weight:700;">Model No. / name</label>
+          <input type="text" class="cm-name" style="${inp} margin-bottom:8px;">
+          <div style="display:flex; gap:8px;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Size</label><input type="text" class="cm-code" style="${inp}"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Height (inch)</label><input type="text" class="cm-inch" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">MRP (₹)</label><input type="text" class="cm-mrp" style="${inp}" inputmode="numeric"></div>
+          </div>
+          <label style="font-size:11px; color:#a9a9a9; font-weight:700; display:block; margin-top:8px;">Save into catalogue</label>
+          <select class="cm-dest" style="${inp}"></select>
+          <button type="button" class="cm-save" style="width:100%; margin-top:12px; padding:14px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:16px;">💾 Save Combo Product</button>
+          <div class="cm-status" style="text-align:center; color:#7cd992; font-weight:700; font-size:13px; margin-top:8px;"></div>
+        </div>
+      </div>
+      <div class="cm-picker" style="display:none; position:fixed; inset:0; z-index:9001; background:#050505; overflow:auto; padding:14px;">
+        <div style="max-width:520px; margin:0 auto;">
+          <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+            <div class="cm-pk-title" style="flex:1; font-weight:800; color:#f0c341; font-size:16px;"></div>
+            <button type="button" class="cm-pk-close" style="background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:8px 14px; font-weight:800;">✕</button>
+          </div>
+          <input type="text" class="cm-pk-search" placeholder="🔍 Search model no..." style="${inp} margin-bottom:10px;">
+          <div class="cm-pk-sizes" style="display:none; margin-bottom:10px;"></div>
+          <div class="cm-pk-grid" style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(comboModal);
+    const q = (s) => comboModal.querySelector(s);
+    q('.cm-close').onclick = () => { comboModal.style.display = 'none'; document.body.style.overflow = ''; };
+    q('.cm-pk-close').onclick = () => { q('.cm-picker').style.display = 'none'; };
+    q('.cm-addpart').onclick = () => { if (comboState.parts.length >= 4) { alert('Up to 4 parts.'); return; } comboState.parts.push(null); comboRenderParts(); };
+    q('.cm-src').onchange = () => { comboState.src = q('.cm-src').value; comboLsSet('shopapp-combo-src', comboState.src); };
+    [['.cm-less', 'shopapp-combo-less'], ['.cm-margin', 'shopapp-combo-margin'], ['.cm-cust', 'shopapp-combo-cust']].forEach(([sel, key]) => {
+      q(sel).oninput = () => { comboLsSet(key, q(sel).value); comboCalc(true); };
+    });
+    q('.cm-round').onchange = () => { comboLsSet('shopapp-combo-round', q('.cm-round').checked ? '1' : '0'); comboCalc(true); };
+    q('.cm-dest').onchange = async () => {
+      if (q('.cm-dest').value === '__new'){
+        const nm = (prompt('Name for the new catalogue (e.g. COMBO):', 'COMBO') || '').trim();
+        if (!nm){ q('.cm-dest').value = currentCatalogueId; return; }
+        const cat = { id: makeId(), name: nm };
+        catalogues.push(cat); await saveCatalogueList(); renderCatalogueSelect();
+        comboFillDest(cat.id);
+      }
+      comboLsSet('shopapp-combo-dest', q('.cm-dest').value);
+    };
+    q('.cm-pk-search').oninput = () => comboRenderPickerGrid();
+    q('.cm-save').onclick = comboSave;
+  }
+  const q = (s) => comboModal.querySelector(s);
+  comboState.cache = {};
+  comboState.src = comboDefaultSource();
+  q('.cm-src').innerHTML = catalogues.map(c => '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
+  q('.cm-src').value = comboState.src;
+  q('.cm-less').value = comboLs('shopapp-combo-less', '60');
+  q('.cm-margin').value = comboLs('shopapp-combo-margin', '40');
+  q('.cm-cust').value = comboLs('shopapp-combo-cust', '60');
+  q('.cm-round').checked = comboLs('shopapp-combo-round', '1') === '1';
+  const destDefault = comboLs('shopapp-combo-dest', '') ;
+  const combo = catalogues.find(c => /combo/i.test(c.name));
+  comboFillDest(catalogues.some(c => c.id === destDefault) ? destDefault : (combo ? combo.id : currentCatalogueId));
+  q('.cm-status').textContent = '';
+  comboModal.style.display = 'block'; document.body.style.overflow = 'hidden';
+  comboRenderParts();
+}
+function comboFillDest(sel){
+  const d = comboModal.querySelector('.cm-dest');
+  d.innerHTML = catalogues.map(c => '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>').join('') + '<option value="__new">+ New catalogue…</option>';
+  d.value = sel;
+}
+function comboPartLabel(i, n){
+  if (i === 0) return 'Part 1 — TOP (statue / figure)';
+  if (i === n - 1) return 'Part ' + (i + 1) + ' — BOTTOM (base)';
+  return 'Part ' + (i + 1) + ' — middle';
+}
+function comboRenderParts(){
+  const box = comboModal.querySelector('.cm-parts');
+  box.innerHTML = '';
+  const n = comboState.parts.length;
+  comboState.parts.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:10px; background:#141414; border:1.5px solid ' + (p ? '#b8912f' : '#2c2c2c') + '; border-radius:10px; padding:10px; margin-bottom:8px;';
+    row.innerHTML = `
+      <div style="width:64px; height:64px; flex-shrink:0; border-radius:6px; background:#fff; overflow:hidden; display:flex; align-items:center; justify-content:center;">${p ? `<img src="${itemPhoto(p.item)}" style="max-width:100%; max-height:100%;">` : '<span style="color:#999; font-size:24px;">＋</span>'}</div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:11px; font-weight:800; color:#a9a9a9; letter-spacing:0.5px;">${escapeHtml(comboPartLabel(i, n))}</div>
+        <div style="font-size:15px; font-weight:800; color:#fff; margin-top:2px;">${p ? escapeHtml(p.item.name) + ' — Size ' + escapeHtml(p.v.code || '-') : 'Not chosen yet'}</div>
+        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">${p.v.inch ? escapeHtml(p.v.inch) + '" · ' : ''}MRP ₹${comboPrice(p.v)}</div>` : ''}
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <button type="button" class="cm-choose" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:8px 10px; font-weight:800; font-size:12px;">${p ? 'Change' : 'Choose'}</button>
+        ${n > 2 ? '<button type="button" class="cm-remove" style="background:none; color:#e0705a; border:1.5px solid #e0705a; border-radius:6px; padding:6px 10px; font-weight:800; font-size:12px;">Remove</button>' : ''}
+      </div>`;
+    row.querySelector('.cm-choose').onclick = () => comboOpenPicker(i);
+    const rm = row.querySelector('.cm-remove'); if (rm) rm.onclick = () => { comboState.parts.splice(i, 1); comboRenderParts(); comboRebuild(); };
+    box.appendChild(row);
+  });
+  comboCalc(false);
+}
+let comboPickSlot = 0, comboPickItems = [];
+async function comboOpenPicker(slot){
+  comboPickSlot = slot;
+  const q = (s) => comboModal.querySelector(s);
+  q('.cm-picker').style.display = 'block';
+  q('.cm-pk-title').textContent = 'Choose ' + comboPartLabel(slot, comboState.parts.length);
+  q('.cm-pk-sizes').style.display = 'none';
+  q('.cm-pk-search').value = '';
+  q('.cm-pk-grid').innerHTML = '<div style="grid-column:1/-1; color:#999; text-align:center; padding:20px;">Loading...</div>';
+  try { comboPickItems = await comboLoadCatalogueItems(comboState.src); }
+  catch (e) { q('.cm-pk-grid').innerHTML = '<div style="grid-column:1/-1; color:#e0705a; text-align:center; padding:20px;">Could not load — check internet.</div>'; return; }
+  comboRenderPickerGrid();
+}
+function comboRenderPickerGrid(){
+  const q = (s) => comboModal.querySelector(s);
+  const s = q('.cm-pk-search').value.trim().toLowerCase();
+  const list = comboPickItems.filter(it => !s || String(it.name).toLowerCase().includes(s) || (it.variations || []).some(v => String(v.code || '').toLowerCase().includes(s)));
+  const grid = q('.cm-pk-grid');
+  grid.innerHTML = list.length ? '' : '<div style="grid-column:1/-1; color:#999; text-align:center; padding:20px;">No products found.</div>';
+  list.forEach(it => {
+    const d = document.createElement('div');
+    d.style.cssText = 'background:#0b0b0b; border:2px solid #262626; border-radius:8px; overflow:hidden; cursor:pointer;';
+    d.innerHTML = '<img style="width:100%; height:92px; object-fit:contain; background:#fff; display:block;"><div style="font-size:12px; font-weight:800; padding:5px; color:#ddd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></div>';
+    d.querySelector('img').src = itemPhoto(it); d.querySelector('div').textContent = it.name;
+    d.onclick = () => comboShowSizes(it);
+    grid.appendChild(d);
+  });
+}
+function comboShowSizes(it){
+  const q = (s) => comboModal.querySelector(s);
+  const box = q('.cm-pk-sizes');
+  const vars = (it.variations || []).filter(v => v.code || v.inch || v.price);
+  box.style.display = 'block';
+  box.innerHTML = '<div style="font-weight:800; color:#fff; margin-bottom:6px;">' + escapeHtml(it.name) + ' — pick the size:</div>';
+  const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex; flex-wrap:wrap; gap:8px;';
+  (vars.length ? vars : [{ code: '', inch: '', price: '' }]).forEach(v => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.style.cssText = 'padding:10px 14px; border-radius:8px; border:2px solid #f0c341; background:#141414; color:#f0c341; font-weight:800; font-size:14px;' + (v.outOfStock ? ' opacity:0.5;' : '');
+    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
+    b.onclick = () => { comboState.parts[comboPickSlot] = { item: it, v, catId: comboState.src }; q('.cm-picker').style.display = 'none'; comboRenderParts(); comboRebuild(); };
+    wrap.appendChild(b);
+  });
+  box.appendChild(wrap);
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+function comboCalc(keepUserMrp){
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  const less = parseFloat(q('.cm-less').value) || 0, margin = parseFloat(q('.cm-margin').value) || 0, cust = parseFloat(q('.cm-cust').value) || 0;
+  const loose = parts.reduce((a, p) => a + comboPrice(p.v), 0);
+  const cost = loose * (1 - less / 100);
+  const sell = cost * (1 + margin / 100);
+  let mrp = cust < 100 ? sell / (1 - cust / 100) : 0;
+  if (q('.cm-round').checked) mrp = Math.ceil(mrp / 10) * 10; else mrp = Math.round(mrp);
+  const r = (n) => '₹' + (Math.round(n * 100) / 100).toLocaleString('en-IN');
+  q('.cm-calc').innerHTML = parts.length ? (
+    parts.map(p => '<div style="display:flex; justify-content:space-between;"><span>' + escapeHtml(p.item.name) + ' (' + escapeHtml(p.v.code || '-') + ')</span><span>' + r(comboPrice(p.v)) + '</span></div>').join('') +
+    '<div style="display:flex; justify-content:space-between; border-top:1px solid #333; margin-top:4px; padding-top:4px;"><span>Loose MRP total</span><b>' + r(loose) + '</b></div>' +
+    '<div style="display:flex; justify-content:space-between;"><span>Your cost (−' + less + '%)</span><span>' + r(cost) + '</span></div>' +
+    '<div style="display:flex; justify-content:space-between;"><span>+ Margin ' + margin + '% = you get</span><b style="color:#7cd992;">' + r(sell) + '</b></div>' +
+    '<div style="display:flex; justify-content:space-between; font-size:17px; color:#f0c341; margin-top:4px;"><b>New MRP</b><b>' + r(mrp) + '</b></div>' +
+    '<div style="color:#a9a9a9; font-size:12px;">After ' + cust + '% off the customer pays ' + r(mrp * (1 - cust / 100)) + '</div>'
+  ) : '<span style="color:#888;">Choose the parts to see the price.</span>';
+  comboState.mrp = mrp;
+  q('.cm-mrp').value = parts.length ? mrp : '';
+  // default name / height
+  const inch = parts.reduce((a, p) => a + comboInch(p.v), 0);
+  q('.cm-inch').value = inch ? String(Math.round(inch * 100) / 100) : '';
+  if (!q('.cm-name').dataset.touched) q('.cm-name').value = parts.map(p => p.item.name + (p.v.code ? '-' + p.v.code : '')).join(' + ');
+  if (!q('.cm-code').value) q('.cm-code').value = 'A';
+  q('.cm-name').oninput = () => { q('.cm-name').dataset.touched = '1'; };
+}
+let comboRunId = 0, comboImage = '';
+async function comboRebuild(){
+  const my = ++comboRunId;
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  comboImage = '';
+  if (!parts.length){ q('.cm-preview').removeAttribute('src'); return; }
+  q('.cm-pstatus').textContent = '⏳ Joining photos...';
+  const layers = [];
+  for (const p of parts){
+    const full = await fetchFullPhoto(p.catId, p.item);
+    const im = await adLoadImage(full);
+    if (!im) continue;
+    let cut = adCutout(im);
+    if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
+    layers.push({ cut, inch: comboInch(p.v) || 0 });
+  }
+  if (my !== comboRunId) return;
+  // heights: by inches when known, else by the photo's own proportion
+  const known = layers.filter(l => l.inch > 0);
+  const avgPxPerInch = known.length ? known.reduce((a, l) => a + l.cut.height / l.inch, 0) / known.length : 0;
+  layers.forEach(l => { l.h = l.inch > 0 ? l.inch : (avgPxPerInch ? l.cut.height / avgPxPerInch : 4); });
+  const W = 1000, H = 1300, M = 60, overlap = 0.03;
+  const totalIn = layers.reduce((a, l, i) => a + l.h * (i < layers.length - 1 ? 1 - overlap : 1), 0);
+  let k = (H - 2 * M) / totalIn;
+  layers.forEach(l => { const w = l.cut.width * (l.h * k) / l.cut.height; if (w > W - 2 * M) k = Math.min(k, (W - 2 * M) * l.cut.height / (l.cut.width * l.h)); });
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  const stackH = totalIn * k;
+  let bottom = (H + stackH) / 2;
+  // soft shadow under the base
+  const baseW = layers[layers.length - 1].cut.width * (layers[layers.length - 1].h * k) / layers[layers.length - 1].cut.height;
+  ctx.fillStyle = 'rgba(0,0,0,0.12)'; ctx.beginPath(); ctx.ellipse(W / 2, bottom - 4, baseW * 0.5, 16, 0, 0, Math.PI * 2); ctx.fill();
+  for (let i = layers.length - 1; i >= 0; i--){
+    const l = layers[i]; const h = l.h * k; const w = l.cut.width * h / l.cut.height;
+    ctx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
+    bottom = bottom - h * (1 - overlap);
+  }
+  comboImage = c.toDataURL('image/jpeg', 0.9);
+  q('.cm-preview').src = comboImage;
+  q('.cm-pstatus').textContent = '';
+}
+async function comboSave(){
+  const q = (s) => comboModal.querySelector(s);
+  if (comboState.parts.some(p => !p)){ alert('Please choose every part first (or Remove the empty one).'); return; }
+  if (!comboImage){ alert('The photo is still being made — wait a moment.'); return; }
+  const name = q('.cm-name').value.trim();
+  if (!name){ alert('Please enter a model number / name.'); return; }
+  const variation = { code: q('.cm-code').value.trim(), inch: q('.cm-inch').value.trim(), price: q('.cm-mrp').value.trim() };
+  const destId = q('.cm-dest').value;
+  const btn = q('.cm-save'); btn.disabled = true; q('.cm-status').style.color = '#f0c341'; q('.cm-status').textContent = '⏳ Saving...';
+  try {
+    const parts = comboState.parts.map(p => ({ name: p.item.name, size: p.v.code || '', inch: p.v.inch || '', mrp: p.v.price || '' }));
+    if (destId === currentCatalogueId){
+      if (itemsLoadFailed) throw new Error('This catalogue did not load properly — tap Refresh first.');
+      const existing = items.find(i => i.name.trim().toUpperCase() === name.toUpperCase());
+      if (existing && confirm('"' + name + '" already exists here. Add this as another size to it?\n\nOK = add size · Cancel = stop')){
+        existing.variations = (existing.variations || []).concat([variation]);
+        renderGrid(); await saveItemToStorage(existing);
+      } else if (existing){ throw new Error('cancelled'); }
+      else {
+        const it = { id: Date.now(), dataUrl: comboImage, name, variations: [variation], comboParts: parts };
+        items.push(it); photoDirty.add(it.id); renderGrid(); await saveItemToStorage(it);
+      }
+    } else {
+      const list = await comboLoadCatalogueItems(destId).catch(() => null);
+      if (!list) throw new Error('Could not open that catalogue — check internet.');
+      const existing = list.find(i => String(i.name).trim().toUpperCase() === name.toUpperCase());
+      if (existing){
+        if (!confirm('"' + name + '" already exists there. Add this as another size to it?')) throw new Error('cancelled');
+        existing.variations = (existing.variations || []).concat([variation]);
+        const light = { ...existing }; delete light.dataUrl;
+        await storage.set(itemKey(destId, existing.id), JSON.stringify(light), true);
+      } else {
+        const it = { id: Date.now(), dataUrl: comboImage, name, variations: [variation], comboParts: parts };
+        const { light, full } = await splitItem(it);
+        if (full) await storage.set(photoKey(destId, it.id), full);   // photo first
+        await storage.set(itemKey(destId, it.id), JSON.stringify(light), true);
+        const idx = await storage.get(indexKey(destId));
+        const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+        ids.push(it.id);
+        await storage.set(indexKey(destId), JSON.stringify(ids), true);
+        list.push(light);
+      }
+    }
+    const destName = (catalogues.find(c => c.id === destId) || {}).name || '';
+    q('.cm-status').style.color = '#7cd992';
+    q('.cm-status').textContent = '✅ Saved "' + name + '" (' + (variation.code ? 'Size ' + variation.code + ', ' : '') + (variation.inch ? variation.inch + '", ' : '') + 'MRP ₹' + variation.price + ') in ' + destName + '. Choose new parts to make the next one.';
+    q('.cm-name').dataset.touched = '';
+  } catch (e) {
+    if (e && e.message === 'cancelled'){ q('.cm-status').textContent = ''; }
+    else { console.error(e); q('.cm-status').style.color = '#e0705a'; q('.cm-status').textContent = '⚠️ Not saved: ' + (e && e.message ? e.message : e); }
+  } finally { btn.disabled = false; }
 }
 
 async function loadItemsFromStorage(silent){
