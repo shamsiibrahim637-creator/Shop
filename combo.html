@@ -1,0 +1,1269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Combo Maker">
+<title>Combo Maker</title>
+<link rel="manifest" href="combo.webmanifest">
+<link rel="apple-touch-icon" href="combo-icon-192.png">
+<link rel="icon" href="combo-icon-192.png">
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<style>body{ margin:0; background:#050505; color:#f2e8cf; font-family:Arial,sans-serif; }</style>
+<script>
+// ---- Firebase init (shared across all three apps for live cross-device sync) ----
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+window.__firebaseReady = false;
+try {
+  firebase.initializeApp(firebaseConfig);
+  window.__db = firebase.firestore();
+  // Keep a copy on the phone (only possible on a real web address) — faster
+  // repeat opens and it keeps working on a weak signal.
+  if (location.protocol === 'https:'){
+    window.__db.enablePersistence({ synchronizeTabs: true }).catch(err => console.warn('Offline copy not enabled:', err && err.code));
+  }
+  window.__firebaseReady = true;
+} catch (err) {
+  console.error('Firebase init failed:', err);
+}
+
+// ---- Shared cloud storage layer (Firestore), used by all three apps ------
+// Every app already talks to `storage.get/set/delete(key[, value])` exactly
+// like it did with IndexedDB — only the plumbing underneath changes.
+//
+// A single bill/purchase/catalogue-item list is saved as ONE JSON string
+// under one key (e.g. "all-bills"). Firestore caps a single document at
+// ~1MB, and that blob only grows over time as the shop's history builds up
+// — so instead of trying to keep photos small enough to always fit in one
+// document (which is what silently broke last time once the data grew),
+// large values are transparently split across several small "chunk"
+// documents and reassembled on read. This means saving can't silently fail
+// just because the data got big.
+const FIRESTORE_CHUNK_SIZE = 900000; // chars per chunk, safely under the ~1MB doc cap
+
+function makeFirestoreStorage(collectionName){
+  function coll(){ return window.__db.collection(collectionName); }
+  function safeId(key){ return String(key).replace(/\//g, '_SLASH_'); }
+  function chunkId(key, i){ return safeId(key) + '__chunk' + i; }
+
+  return {
+    async get(key){
+      const snap = await coll().doc(safeId(key)).get();
+      if (!snap.exists) return null;
+      const data = snap.data();
+      if (!data.chunked) return { key, value: data.value };
+      const n = data.chunkCount || 0;
+      const parts = await Promise.all(
+        Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get())
+      );
+      return { key, value: parts.map(p => (p.exists ? p.data().part : '')).join('') };
+    },
+    async set(key, value){
+      let prevChunkCount = 0;
+      try {
+        const prevSnap = await coll().doc(safeId(key)).get();
+        if (prevSnap.exists && prevSnap.data().chunked) prevChunkCount = prevSnap.data().chunkCount || 0;
+      } catch (e) { /* no previous doc — nothing to clean up */ }
+
+      const str = String(value);
+      if (str.length <= FIRESTORE_CHUNK_SIZE){
+        await coll().doc(safeId(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        if (prevChunkCount > 0){
+          await Promise.all(Array.from({ length: prevChunkCount }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+        return { key, value: str };
+      }
+
+      const chunks = [];
+      for (let i = 0; i < str.length; i += FIRESTORE_CHUNK_SIZE) chunks.push(str.slice(i, i + FIRESTORE_CHUNK_SIZE));
+      await Promise.all(chunks.map((part, i) => coll().doc(chunkId(key, i)).set({ part })));
+      await coll().doc(safeId(key)).set({ chunked: true, chunkCount: chunks.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      if (prevChunkCount > chunks.length){
+        await Promise.all(Array.from({ length: prevChunkCount - chunks.length }, (_, i) =>
+          coll().doc(chunkId(key, chunks.length + i)).delete().catch(() => {})
+        ));
+      }
+      return { key, value: str };
+    },
+    async delete(key){
+      try {
+        const snap = await coll().doc(safeId(key)).get();
+        if (snap.exists && snap.data().chunked){
+          const n = snap.data().chunkCount || 0;
+          await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+      } catch (e) { /* ignore — still try deleting the manifest below */ }
+      await coll().doc(safeId(key)).delete();
+      return { key, deleted: true };
+    },
+    async list(prefix){
+      return { keys: [] }; // not used by any app — kept only for interface compatibility
+    },
+    // Recovery helper: every saved value whose key starts with `prefix`
+    // (e.g. all products saved under one catalogue, even ones that have
+    // dropped out of its product list). Reassembles chunked values.
+    async listByPrefix(prefix){
+      const FP = firebase.firestore.FieldPath.documentId();
+      const start = safeId(prefix);
+      const snap = await coll().where(FP, '>=', start).where(FP, '<', start + '\uf8ff').get();
+      const out = [];
+      for (const d of snap.docs){
+        if (d.id.indexOf('__chunk') !== -1) continue;
+        const key = d.id.replace(/_SLASH_/g, '/');
+        const data = d.data() || {};
+        let value = null;
+        if (!data.chunked) value = data.value;
+        else { const r = await this.get(key); value = r ? r.value : null; }
+        if (value != null) out.push({ key, value });
+      }
+      return out;
+    },
+    // Bulk write for imports: writing hundreds of items one at a time (each
+    // a separate get-then-set round trip) is what actually broke large
+    // imports before — on a slow connection it can take so long the person
+    // assumes it's done and leaves the page, so only the first few items
+    // ever get saved. This uses Firestore's batch write instead, splitting
+    // batches by BOTH item count (max 400, Firestore's own per-batch limit)
+    // AND total data size (max ~8MB, safely under Firestore's ~10MB
+    // per-request cap) — photos mean a batch can hit the size limit long
+    // before it hits the count limit. Any single value still too big for
+    // one chunk falls back to the normal chunked set() afterwards.
+    async setMany(pairs){
+      const MAX_BATCH_OPS = 400;
+      const MAX_BATCH_BYTES = 8000000;
+      const overflow = [];
+      let batch = window.__db.batch();
+      let opsInBatch = 0;
+      let bytesInBatch = 0;
+
+      for (const [key, value] of pairs){
+        const str = String(value);
+        if (str.length > FIRESTORE_CHUNK_SIZE){ overflow.push([key, value]); continue; }
+
+        if (opsInBatch > 0 && (opsInBatch >= MAX_BATCH_OPS || bytesInBatch + str.length > MAX_BATCH_BYTES)){
+          await batch.commit();
+          batch = window.__db.batch();
+          opsInBatch = 0;
+          bytesInBatch = 0;
+        }
+
+        batch.set(coll().doc(safeId(key)), { chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        opsInBatch++;
+        bytesInBatch += str.length;
+      }
+      if (opsInBatch > 0) await batch.commit();
+
+      for (const [key, value] of overflow){
+        await this.set(key, value);
+      }
+    },
+    async getAllEntries(){ return this.listByPrefix(''); },
+    // Deletes everything in this collection except keepKeys.
+    async clearAll(keepKeys){
+      const keep = new Set(keepKeys || []);
+      const all = await this.listByPrefix('');
+      await Promise.all(all.filter(r => !keep.has(r.key)).map(r => this.delete(r.key).catch(() => null)));
+    },
+    // Real-time: cb(value) fires immediately with the current value, then
+    // again every time this key changes on any device. Returns an unsubscribe
+    // function.
+    onChange(key, cb){
+      return coll().doc(safeId(key)).onSnapshot(async (snap) => {
+        if (!snap.exists){ cb(null); return; }
+        const data = snap.data();
+        if (!data.chunked){ cb(data.value); return; }
+        const n = data.chunkCount || 0;
+        try {
+          const parts = await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get()));
+          cb(parts.map(p => (p.exists ? p.data().part : '')).join(''));
+        } catch (e) { console.error('Live update failed for', key, e); }
+      }, (err) => console.error('Live sync error for', key, err));
+    }
+  };
+}
+</script>
+</head>
+<body>
+<!-- ===== PIN lock: keeps casual visitors out of the app ===== -->
+<div id="pin-lock" style="position:fixed; inset:0; z-index:99999; background:#050505; display:flex; align-items:center; justify-content:center; padding:24px;">
+  <div style="width:100%; max-width:340px; text-align:center; font-family:Arial,sans-serif;">
+    <div style="font-size:44px; margin-bottom:6px;">🔒</div>
+    <h2 id="pin-title" style="font-family:Georgia,serif; color:#f0c341; letter-spacing:1px; margin:0 0 6px; font-size:24px;">Shop App</h2>
+    <p id="pin-msg" style="color:#c9c9c9; font-size:14px; margin:0 0 18px; line-height:1.4;">Checking...</p>
+    <input id="pin-input-1" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <input id="pin-input-2" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Repeat PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <button id="pin-go-btn" type="button" style="display:none; width:100%; padding:15px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:17px; cursor:pointer;">Unlock</button>
+    <button id="pin-cancel-btn" type="button" style="display:none; width:100%; margin-top:10px; padding:13px; border:1.5px solid #333; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+    <p id="pin-error" style="color:#e0705a; font-size:14px; font-weight:700; min-height:20px; margin:12px 0 0;"></p>
+    <p id="pin-help" style="display:none; color:#8a8a8a; font-size:12px; margin:14px 0 0; line-height:1.4;">Forgot the PIN? Open the app on a phone that's already unlocked and use 🔒 → Change PIN.</p>
+  </div>
+</div>
+
+<div id="app-topbar" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:#0a2a1a; border-bottom:1.5px solid #25d366; position:relative; font-family:Arial,sans-serif;">
+  <span style="font-size:12px; font-weight:700; color:#7cd992; white-space:nowrap;">☁️ Cloud</span>
+  <span style="display:flex; gap:6px;">
+    <button id="install-btn" type="button" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:7px 12px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap;">📲 Add to Home Screen</button>
+    <button id="pin-menu-btn" type="button" title="Lock / Change PIN" style="background:none; border:1px solid #25d366; color:#7cd992; border-radius:6px; padding:4px 9px; font-size:13px; cursor:pointer;">🔒</button>
+  </span>
+  <div id="pin-menu" style="display:none; position:absolute; right:8px; top:100%; margin-top:4px; z-index:9000; background:#161616; border:1.5px solid #b8912f; border-radius:8px; overflow:hidden; text-align:left;">
+    <button type="button" id="pin-lock-now" style="display:block; width:100%; padding:12px 18px; background:none; border:none; border-bottom:1px solid #333; color:#f0c341; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔒 Lock now</button>
+    <button type="button" id="pin-change" style="display:block; width:100%; padding:12px 18px; background:none; border:none; color:#c9c9c9; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔑 Change PIN</button>
+  </div>
+</div>
+<script>
+// ---- PIN lock ----
+// One PIN for the whole shop, stored (as a scrambled fingerprint, never the
+// PIN itself) in the cloud so it's the same on every phone. Once a phone is
+// unlocked it stays unlocked until you tap 🔒 → Lock now, or the PIN changes.
+// Note: this keeps casual visitors out of the app screen; it is not the same
+// as a full account login.
+(function(){
+  const lockEl = document.getElementById('pin-lock');
+  const titleEl = document.getElementById('pin-title');
+  const msgEl = document.getElementById('pin-msg');
+  const in1 = document.getElementById('pin-input-1');
+  const in2 = document.getElementById('pin-input-2');
+  const goBtn = document.getElementById('pin-go-btn');
+  const errEl = document.getElementById('pin-error');
+  const helpEl = document.getElementById('pin-help');
+  const PIN_KEY = 'app-pin';
+  const LOCAL_KEY = 'shopapp-unlocked-with';
+  const pinStore = makeFirestoreStorage('billing_kv');
+  let mode = 'checking'; // 'set' | 'unlock' | 'change'
+  let cloudPin = null;   // { hash, salt }
+
+  function fingerprint(pin, salt){
+    const s = salt + ':' + pin + ':shop-app';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let r = 0; r < 500; r++){ // repeated so guessing is slow
+      for (let i = 0; i < s.length; i++){
+        const ch = s.charCodeAt(i) + r;
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    }
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+  function localGet(){ try { return localStorage.getItem(LOCAL_KEY); } catch (e) { return null; } }
+  function localSet(v){ try { if (v) localStorage.setItem(LOCAL_KEY, v); else localStorage.removeItem(LOCAL_KEY); } catch (e) {} }
+
+  function showLock(newMode, message){
+    mode = newMode;
+    lockEl.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    titleEl.textContent = newMode === 'set' ? 'Set a PIN' : newMode === 'change' ? 'Change PIN' : 'Shop App';
+    msgEl.textContent = message;
+    errEl.textContent = '';
+    const typing = newMode !== 'checking';
+    in1.style.display = typing ? 'block' : 'none';
+    in2.style.display = (newMode === 'set' || newMode === 'change') ? 'block' : 'none';
+    goBtn.style.display = typing ? 'block' : 'none';
+    goBtn.textContent = newMode === 'unlock' ? 'Unlock' : 'Save PIN';
+    helpEl.style.display = newMode === 'unlock' ? 'block' : 'none';
+    document.getElementById('pin-cancel-btn').style.display = newMode === 'change' ? 'block' : 'none';
+    in1.value = ''; in2.value = '';
+    in1.placeholder = newMode === 'unlock' ? 'PIN' : 'New PIN';
+    if (typing) setTimeout(() => in1.focus(), 50);
+  }
+  function hideLock(){
+    lockEl.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function savePin(pin){
+    const salt = Math.random().toString(36).slice(2, 10);
+    const rec = { hash: fingerprint(pin, salt), salt };
+    await pinStore.set(PIN_KEY, JSON.stringify(rec));
+    cloudPin = rec;
+    localSet(rec.hash);
+  }
+
+  async function submit(){
+    errEl.textContent = '';
+    const p1 = in1.value.trim(), p2 = in2.value.trim();
+    if (!/^\d{4,8}$/.test(p1)){ errEl.textContent = 'PIN must be 4 to 8 digits.'; return; }
+    if (mode === 'unlock'){
+      if (cloudPin && fingerprint(p1, cloudPin.salt) === cloudPin.hash){
+        localSet(cloudPin.hash);
+        hideLock();
+      } else {
+        errEl.textContent = 'Wrong PIN — try again.';
+        in1.value = '';
+      }
+      return;
+    }
+    if (p1 !== p2){ errEl.textContent = 'The two PINs don\'t match.'; return; }
+    goBtn.disabled = true; goBtn.textContent = 'Saving...';
+    try {
+      await savePin(p1);
+      hideLock();
+      if (mode === 'change') alert('PIN changed ✓ — other phones will ask for the new PIN next time.');
+    } catch (e) {
+      errEl.textContent = 'Could not save the PIN — check your internet and try again.';
+    } finally {
+      goBtn.disabled = false; goBtn.textContent = 'Save PIN';
+    }
+  }
+  goBtn.addEventListener('click', submit);
+  document.getElementById('pin-cancel-btn').addEventListener('click', hideLock);
+  [in1, in2].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  async function start(){
+    showLock('checking', 'Checking...');
+    let r;
+    try {
+      r = await pinStore.get(PIN_KEY);
+    } catch (e) {
+      // Offline: a phone that was already unlocked keeps working.
+      if (localGet()) { hideLock(); return; }
+      showLock('checking', 'Can\'t reach the internet to check the PIN. Connect and reopen the app.');
+      return;
+    }
+    if (!r || !r.value){
+      showLock('set', 'Choose a 4–8 digit PIN for your shop app. Everyone using the app will need it once on each phone.');
+      return;
+    }
+    try { cloudPin = JSON.parse(r.value); } catch (e) { cloudPin = null; }
+    if (cloudPin && localGet() === cloudPin.hash){ hideLock(); return; }
+    showLock('unlock', 'Enter your shop PIN.');
+  }
+
+  // 🔒 menu
+  const menuBtn = document.getElementById('pin-menu-btn');
+  const menu = document.getElementById('pin-menu');
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; });
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.getElementById('pin-lock-now').addEventListener('click', () => {
+    localSet(null);
+    showLock('unlock', 'Locked. Enter your shop PIN.');
+  });
+  document.getElementById('pin-change').addEventListener('click', () => {
+    // This phone is already unlocked, so it's trusted to set a new PIN.
+    showLock('change', 'Type a new 4–8 digit PIN twice. All phones will need the new PIN once.');
+  });
+
+  start();
+})();
+</script>
+<script>
+// ---- "Add to Home Screen" ----
+(function(){
+  const btn = document.getElementById('install-btn');
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none'; // already opened from the home-screen icon
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.addEventListener('click', async () => {
+    if (deferred){
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) {}
+      deferred = null;
+      return;
+    }
+    if (location.protocol !== 'https:'){
+      alert('To add this app to your home screen, open it from its web address (your GitHub link) — not from a downloaded or WhatsApp file.');
+      return;
+    }
+    alert('Your phone didn\'t offer the quick install, so add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker not registered:', err));
+  }
+})();
+</script>
+<div id="combo-loading" style="padding:40px 20px; text-align:center; color:#f0c341; font-weight:800;">⏳ Loading your catalogues…</div>
+<script>
+// ===================== Combo Maker (separate app, same cloud catalogue) =====================
+const storage = makeFirestoreStorage('catalogue_kv');
+function indexKey(catId){ return 'index:' + catId; }
+function itemKey(catId, itemId){ return 'item:' + catId + ':' + itemId; }
+function makeId(){ return 'cat-' + Date.now() + '-' + Math.floor(Math.random() * 1000); }
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+let catalogues = [];
+let currentCatalogueId = null;          // no catalogue is "open" here — combos are written straight to the chosen catalogue
+let items = [], itemsLoadFailed = false;
+function renderGrid(){} function renderCatalogueSelect(){}
+async function saveItemToStorage(){}
+async function saveCatalogueList(){ await storage.set('catalogue-list', JSON.stringify(catalogues), true); }
+const photoKey = (catId, itemId) => 'photo:' + catId + ':' + itemId;
+const fullPhotoCache = new Map();  // photoKey -> full photo
+const photoDirty = new Set();      // product ids whose full photo still has to be saved
+
+function itemPhoto(item){ return (item && (item.thumb || item.dataUrl)) || ''; }
+
+function makeThumb(dataUrl){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 360;
+      const scale = Math.min(1, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+      const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+      const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(c.toDataURL("image/jpeg", 0.7));
+    };
+    img.onerror = () => reject(new Error('Could not read photo'));
+    img.src = dataUrl;
+  });
+}
+
+// Light record (thumbnail only) + the full photo, ready to save separately.
+async function splitItem(item){
+  const light = { ...item };
+  const full = light.dataUrl || '';
+  delete light.dataUrl;
+  if (full && !light.thumb){
+    try { light.thumb = await makeThumb(full); }
+    catch (e) { return { light: { ...item }, full: '' }; } // photo unreadable: keep it the old way, never lose it
+  }
+  if (full) light.hasPhoto = true;
+  return { light, full };
+}
+
+async function fetchFullPhoto(catId, item){
+  if (item.dataUrl) return item.dataUrl;
+  const k = photoKey(catId, item.id);
+  if (fullPhotoCache.has(k)) return fullPhotoCache.get(k);
+  let v = '';
+  try { const r = await storage.get(k); v = r && r.value ? r.value : ''; } catch (e) { console.error(e); }
+  if (!v) v = item.thumb || '';  // fall back to the thumbnail rather than nothing
+  fullPhotoCache.set(k, v);
+  return v;
+}
+
+// Puts the full photos onto these products (in memory only) — used before
+// PDF / photo / backup exports. Shows progress in the status line.
+async function loadFullPhotosInto(list, catId){
+  catId = catId || currentCatalogueId;
+  let done = 0;
+  const need = list.filter(it => !it.dataUrl);
+  await Promise.all(need.map(async it => {
+    it.dataUrl = await fetchFullPhoto(catId, it);
+    done++;
+    if (need.length > 3) statusEl.textContent = '⏳ Getting full-size photos ' + done + ' of ' + need.length + '...';
+  }));
+}
+
+// One-time background conversion of products saved the old way.
+function adLoadImage(src){
+  return new Promise((resolve) => {
+    if (!src){ resolve(null); return; }
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+}
+function adRoundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function adFitText(ctx, text, maxW, size, weight){
+  let s = size;
+  do { ctx.font = weight + ' ' + s + 'px Arial, sans-serif'; if (ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 18);
+  return s;
+}
+function adSeededRandom(seed){ let x = (Number(seed) || 1) % 2147483647; if (x <= 0) x += 2147483646; return () => (x = x * 16807 % 2147483647) / 2147483647; }
+function adGoldGradient(ctx, y0, y1){
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, '#fff6c2'); g.addColorStop(0.35, '#f5cf55'); g.addColorStop(0.6, '#c9971f'); g.addColorStop(1, '#ffe38a');
+  return g;
+}
+// Removes a plain (white / single-colour) photo background so the product
+// stands on the ad. Returns null when the background isn't plain enough.
+function adCutout(im){
+  const maxSide = 900;
+  const sc = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * sc)), h = Math.max(1, Math.round(im.naturalHeight * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.drawImage(im, 0, 0, w, h);
+  let data;
+  try { data = ctx.getImageData(0, 0, w, h); } catch (e) { return null; }
+  const d = data.data;
+  const px = (x, y) => (y * w + x) * 4;
+  const corners = [px(1, 1), px(w - 2, 1), px(1, h - 2), px(w - 2, h - 2)].map(i => [d[i], d[i + 1], d[i + 2]]);
+  const bg = [0, 1, 2].map(k => corners.reduce((a, c2) => a + c2[k], 0) / 4);
+  const spread = Math.max(...corners.map(c2 => Math.abs(c2[0] - bg[0]) + Math.abs(c2[1] - bg[1]) + Math.abs(c2[2] - bg[2])));
+  if (spread > 60) return null; // busy background — keep the photo as it is
+  const tol = 70;
+  const dist = (i) => Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+  const seen = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  let qh = 0, qt = 0;
+  const push = (x, y) => { const k = y * w + x; if (seen[k]) return; seen[k] = 1; if (dist(k * 4) <= tol){ queue[qt++] = k; } };
+  for (let x = 0; x < w; x++){ push(x, 0); push(x, h - 1); }
+  for (let y = 0; y < h; y++){ push(0, y); push(w - 1, y); }
+  while (qh < qt){
+    const k = queue[qh++]; d[k * 4 + 3] = 0;
+    const x = k % w, y = (k - x) / w;
+    if (x > 0) push(x - 1, y); if (x < w - 1) push(x + 1, y); if (y > 0) push(x, y - 1); if (y < h - 1) push(x, y + 1);
+  }
+  const removed = qt / (w * h);
+  if (removed < 0.08) return null; // almost nothing removed — not a plain background
+  // soften the edge: pixels touching the removed area fade a little
+  for (let y = 1; y < h - 1; y++){
+    for (let x = 1; x < w - 1; x++){
+      const k = y * w + x; if (d[k * 4 + 3] === 0) continue;
+      if (d[(k - 1) * 4 + 3] === 0 || d[(k + 1) * 4 + 3] === 0 || d[(k - w) * 4 + 3] === 0 || d[(k + w) * 4 + 3] === 0){
+        const dd = dist(k * 4); if (dd < tol * 2.2) d[k * 4 + 3] = Math.round(255 * Math.min(1, dd / (tol * 2.2)) * 0.9 + 25);
+      }
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  // trim to the product
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 20){ if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  const t = document.createElement('canvas'); t.width = maxX - minX + 1; t.height = maxY - minY + 1;
+  t.getContext('2d').drawImage(c, minX, minY, t.width, t.height, 0, 0, t.width, t.height);
+  return t;
+}
+function adCrown(ctx, cx, cy, w){
+  const h = w * 0.62;
+  ctx.save();
+  ctx.fillStyle = adGoldGradient(ctx, cy - h / 2, cy + h / 2);
+  ctx.beginPath();
+  ctx.moveTo(cx - w / 2, cy + h / 2);
+  ctx.lineTo(cx - w / 2, cy - h * 0.15);
+  ctx.lineTo(cx - w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx, cy - h / 2);
+  ctx.lineTo(cx + w * 0.25, cy + h * 0.1);
+  ctx.lineTo(cx + w / 2, cy - h * 0.15);
+  ctx.lineTo(cx + w / 2, cy + h / 2);
+  ctx.closePath(); ctx.fill();
+  [[-0.5, -0.15], [0, -0.5], [0.5, -0.15]].forEach(([fx, fy]) => { ctx.beginPath(); ctx.arc(cx + w * fx, cy + h * fy, w * 0.07, 0, Math.PI * 2); ctx.fill(); });
+  ctx.restore();
+}
+function adGoldText(ctx, text, x, y, size, font, maxW){
+  let s = size;
+  do { ctx.font = font.replace('{s}', s); if (!maxW || ctx.measureText(text).width <= maxW) break; s -= 2; } while (s > 16);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
+  ctx.lineWidth = Math.max(2, s / 14); ctx.strokeStyle = '#3a2600'; ctx.strokeText(text, x, y);
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = adGoldGradient(ctx, y - s / 2, y + s / 2); ctx.fillText(text, x, y);
+  ctx.restore();
+  return s;
+}
+function adInfoBox(ctx, x, y, w, h){
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 18;
+  adRoundRect(ctx, x, y, w, h, 18); ctx.fillStyle = '#0b0b0b'; ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = 4; ctx.strokeStyle = adGoldGradient(ctx, y, y + h); ctx.stroke();
+  ctx.restore();
+}
+function adGoldPill(ctx, x, y, w, h, text, size){
+  ctx.save();
+  adRoundRect(ctx, x, y, w, h, 12);
+  const g = ctx.createLinearGradient(0, y, 0, y + h); g.addColorStop(0, '#ffe9a0'); g.addColorStop(0.5, '#f0c43f'); g.addColorStop(1, '#c99a22');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = '#111'; adFitText(ctx, text, w - 24, size, 'bold'); ctx.fillText(text, x + w / 2, y + h / 2 + 2);
+  ctx.restore();
+}
+// ===================== 🧩 Combo Maker =====================
+// Build a ready product from loose parts (e.g. statue 5579-C on a base):
+// joins the photos, adds up the height, and works out the MRP from the
+// loose-catalogue MRPs: cost = MRP − purchase discount, + your margin,
+// then MRP is set so that after the customer discount you get that price.
+const comboState = { parts: [null, null], src: '', cache: {} };
+let comboModal = null;
+const comboLs = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
+const comboLsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+
+async function comboLoadCatalogueItems(catId){
+  if (comboState.cache[catId]) return comboState.cache[catId];
+  const idx = await storage.get(indexKey(catId));
+  const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+  const list = (await Promise.all(ids.map(id => storage.get(itemKey(catId, id)).then(r => (r && r.value ? JSON.parse(r.value) : null)).catch(() => null)))).filter(Boolean);
+  comboState.cache[catId] = list;
+  return list;
+}
+function comboDefaultSource(){
+  const loose = catalogues.find(c => /loose/i.test(c.name)) || catalogues.find(c => c.tagColor) || catalogues[0];
+  return comboLs('shopapp-combo-src', '') && catalogues.some(c => c.id === comboLs('shopapp-combo-src', '')) ? comboLs('shopapp-combo-src', '') : (loose ? loose.id : '');
+}
+function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^0-9.]/g, '')) || 0; }
+function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
+function comboInchKey(p){ return 'shopapp-combo-inch:' + p.catId + ':' + p.item.id + ':' + (p.v.code || ''); }
+// Real height of a part: what you typed in the Combo Maker, else the size's inch in the catalogue
+function comboCropKey(p){ return 'shopapp-combo-crop:' + p.catId + ':' + p.item.id; }
+function comboSyncCropSliders(){
+  if (!comboModal) return;
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  const top = parts[0], bot = parts.length > 1 ? parts[parts.length - 1] : null;
+  q('.cm-ctop').value = top ? (parseFloat(comboLs(comboCropKey(top), '0')) || 0) : 0;
+  q('.cm-cbot').value = bot ? (parseFloat(comboLs(comboCropKey(bot), '0')) || 0) : 0;
+  q('.cm-ctop-v').textContent = q('.cm-ctop').value + '%'; q('.cm-cbot-v').textContent = q('.cm-cbot').value + '%';
+}
+function comboPartInch(p){ const o = parseFloat(comboLs(comboInchKey(p), '')); return o > 0 ? o : comboInch(p.v); }
+
+// ---- AI background removal (runs on the phone; the AI is downloaded once) ----
+// Tried in order; the first one that loads is used.
+const SMART_BG_LIBS = [
+  'https://esm.sh/@imgly/background-removal@1.7.0?deps=onnxruntime-web@1.21.0',
+  'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm',
+  'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/+esm'
+];
+async function loadSmartBgLib(){
+  let lastErr = null;
+  for (const u of SMART_BG_LIBS){
+    try { const lib = await import(u); const fn = lib.removeBackground || (lib.default && lib.default.removeBackground) || lib.default; if (typeof fn === 'function') return { fn, url: u }; }
+    catch (e) { lastErr = e; console.warn('Background-removal library failed from', u, e); }
+  }
+  throw lastErr || new Error('library not available');
+}
+const smartCutCache = new Map();
+function cutoutDb(){
+  return new Promise((res, rej) => { const r = indexedDB.open('shopapp-cutouts', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function cutoutDbGet(key){ try { const db = await cutoutDb(); return await new Promise(res => { const g = db.transaction('kv').objectStore('kv').get(key); g.onsuccess = () => res(g.result || null); g.onerror = () => res(null); }); } catch (e) { return null; } }
+async function cutoutDbPut(key, blob){ try { const db = await cutoutDb(); db.transaction('kv', 'readwrite').objectStore('kv').put(blob, key); } catch (e) {} }
+function trimTransparent(img){
+  const c = document.createElement('canvas'); c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data;
+  let minX = c.width, minY = c.height, maxX = -1, maxY = -1;
+  for (let y = 0; y < c.height; y++) for (let i = 0; i < c.width; i++) if (d[(y * c.width + i) * 4 + 3] > 24){ if (i < minX) minX = i; if (i > maxX) maxX = i; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  const t = document.createElement('canvas'); t.width = maxX - minX + 1; t.height = maxY - minY + 1;
+  t.getContext('2d').drawImage(c, minX, minY, t.width, t.height, 0, 0, t.width, t.height);
+  return t;
+}
+async function smartCutout(dataUrl, key, onStatus){
+  const fingerprint = key + ':' + (dataUrl ? dataUrl.length : 0);
+  const keepMid0 = !comboModal || !comboModal.querySelector('.cm-fill') || comboModal.querySelector('.cm-fill').checked;
+  if (smartCutCache.has(fingerprint + (keepMid0 ? ':fill' : ''))) return smartCutCache.get(fingerprint + (keepMid0 ? ':fill' : ''));
+  let blob = await cutoutDbGet(fingerprint);
+  if (!blob){
+    onStatus('⏳ Loading the background-removal AI… (first time takes a minute)');
+    if (!window.__smartBgLib) window.__smartBgLib = loadSmartBgLib();
+    let lib;
+    try { lib = await window.__smartBgLib; } catch (e) { window.__smartBgLib = null; throw new Error('could not load the AI (' + (e && e.message ? e.message : e) + ')'); }
+    const src = await (await fetch(dataUrl)).blob();
+    let lastErr = null;
+    for (const opts of [{ device: 'cpu', model: 'isnet_quint8' }, {}]){
+      try {
+        blob = await lib.fn(src, Object.assign({
+          output: { format: 'image/png' },
+          progress: (k, cur, total) => { if (total) onStatus('⏳ Downloading AI… ' + Math.round(cur / total * 100) + '%'); }
+        }, opts));
+        if (blob) break;
+      } catch (e) { lastErr = e; console.warn('removeBackground failed with', opts, e); }
+    }
+    if (!blob) throw lastErr || new Error('no result');
+    onStatus('⏳ Removing background…');
+    cutoutDbPut(fingerprint, blob);
+  }
+  const url = URL.createObjectURL(blob);
+  const im = await adLoadImage(url);
+  if (!im) return null;
+  // 1) drop the reflection (using the AI's own see-through edges), 2) then fill gaps in the middle
+  const raw = document.createElement('canvas'); raw.width = im.naturalWidth; raw.height = im.naturalHeight;
+  raw.getContext('2d').drawImage(im, 0, 0);
+  let src2 = cutReflection(raw);
+  const keepMiddle = !comboModal || !comboModal.querySelector('.cm-fill') || comboModal.querySelector('.cm-fill').checked;
+  if (keepMiddle){
+    const orig = await adLoadImage(dataUrl);
+    if (orig) src2 = fillEnclosedHoles(src2, orig) || src2;
+  }
+  const cut = trimTransparent(src2);
+  if (cut) smartCutCache.set(fingerprint + (keepMiddle ? ':fill' : ''), cut);
+  return cut;
+}
+// The AI sometimes removes a plain part in the MIDDLE of the trophy (e.g. the
+// gold disc inside a ring). Any see-through area that is fully surrounded by
+// the trophy and is not tiny is put back from the original photo.
+function fillEnclosedHoles(cutImg, origImg){
+  const w = cutImg.naturalWidth || cutImg.width, h = cutImg.naturalHeight || cutImg.height;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(cutImg, 0, 0);
+  const o = document.createElement('canvas'); o.width = w; o.height = h;
+  o.getContext('2d').drawImage(origImg, 0, 0, w, h, 0, 0, w, h);
+  let cd, od;
+  try { cd = x.getImageData(0, 0, w, h); od = o.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return null; }
+  const d = cd.data, N = w * h;
+  const state = new Uint8Array(N); // 0 = unvisited, 1 = solid, 2 = outside, 3 = hole
+  let solid = 0;
+  for (let i = 0; i < N; i++) if (d[i * 4 + 3] >= 128){ state[i] = 1; solid++; }
+  const stack = new Int32Array(N);
+  let sp = 0;
+  const seed = (i) => { if (state[i] === 0){ state[i] = 2; stack[sp++] = i; } };
+  for (let i = 0; i < w; i++){ seed(i); seed((h - 1) * w + i); }
+  for (let j = 0; j < h; j++){ seed(j * w); seed(j * w + w - 1); }
+  while (sp){ const i = stack[--sp], px = i % w; if (px > 0) seed(i - 1); if (px < w - 1) seed(i + 1); if (i >= w) seed(i - w); if (i < N - w) seed(i + w); }
+  const minSize = Math.max(60, solid * 0.004);
+  let changed = false;
+  for (let i0 = 0; i0 < N; i0++){
+    if (state[i0] !== 0) continue;
+    const comp = []; state[i0] = 3; stack[0] = i0; sp = 1;
+    while (sp){ const i = stack[--sp]; comp.push(i); const px = i % w;
+      const nb = [px > 0 ? i - 1 : -1, px < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < N - w ? i + w : -1];
+      for (const n of nb) if (n >= 0 && state[n] === 0){ state[n] = 3; stack[sp++] = n; } }
+    if (comp.length >= minSize){
+      for (const i of comp){ d[i * 4] = od[i * 4]; d[i * 4 + 1] = od[i * 4 + 1]; d[i * 4 + 2] = od[i * 4 + 2]; d[i * 4 + 3] = 255; }
+      changed = true;
+    }
+  }
+  if (!changed) return null;
+  x.putImageData(cd, 0, 0);
+  return c;
+}
+
+function openComboMaker(){
+  if (!comboModal){
+    comboModal = document.createElement('div');
+    comboModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); overflow:auto; padding:14px; font-family:Arial,sans-serif; color:#f2e8cf;';
+    const inp = 'width:100%; box-sizing:border-box; padding:10px; border-radius:6px; border:1.5px solid #3a3a3a; background:#0b0b0b; color:#fff; font-weight:700; font-size:15px;';
+    comboModal.innerHTML = `
+      <div style="max-width:520px; margin:0 auto;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+          <h2 style="flex:1; margin:0; font-family:Georgia,serif; color:#f0c341; font-size:22px;">🧩 Combo Maker</h2>
+          <button type="button" class="cm-close" style="background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:8px 14px; font-weight:800;">✕ Close</button>
+        </div>
+        <p style="color:#a9a9a9; font-size:13px; margin:0 0 12px; line-height:1.4;">Pick the parts from your loose catalogue — top part first (statue / figure), then the base. The app joins the photos, adds up the height and works out the MRP.</p>
+        <label style="font-size:12px; font-weight:700; color:#a9a9a9;">Take parts from catalogue</label>
+        <select class="cm-src" style="${inp} margin:4px 0 12px;"></select>
+        <div class="cm-parts"></div>
+        <label style="display:flex; align-items:flex-start; gap:8px; margin:0 0 10px; font-size:13px; font-weight:700; line-height:1.4;"><input type="checkbox" class="cm-ai" checked style="width:18px; height:18px; flex-shrink:0; margin-top:1px;"> <span>✨ Smart background removal (AI) — cuts the trophy and base out of photos with a room / marble background so the trophy stands on the base.<br><span style="color:#8a8a8a; font-weight:400;">First time it downloads the AI (about 40 MB, use Wi-Fi). After that each photo is remembered on this phone.</span></span></label>
+        <label style="display:flex; align-items:center; gap:8px; margin:-4px 0 10px 26px; font-size:13px; font-weight:700;"><input type="checkbox" class="cm-fill" checked style="width:18px; height:18px;"> Keep the middle of the trophy (fill gaps the AI removed)</label>
+        <button type="button" class="cm-addpart" style="width:100%; padding:10px; border-radius:8px; border:1.5px dashed #b8912f; background:none; color:#f0c341; font-weight:800; font-size:14px; margin-bottom:12px;">+ Add another part</button>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PRICE CALCULATION</div>
+          <div style="display:flex; gap:8px;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Less on loose MRP %</label><input type="number" class="cm-less" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Your margin %</label><input type="number" class="cm-margin" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Customer discount %</label><input type="number" class="cm-cust" style="${inp}" inputmode="decimal"></div>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px; align-items:flex-end;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">🔩 Rod (₹) — optional</label><input type="number" class="cm-rod" placeholder="0" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1.4;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Rod price is</label>
+              <select class="cm-rodtype" style="${inp}"><option value="cost">My cost (no discount)</option><option value="mrp">Loose MRP (less % applies)</option></select></div>
+          </div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:13px; font-weight:700;"><input type="checkbox" class="cm-round" style="width:18px; height:18px;"> Round MRP up to the next ₹10</label>
+          <div class="cm-calc" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
+        </div>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PREVIEW</div>
+          <div style="font-size:12px; font-weight:700; color:#a9a9a9; margin-bottom:6px;">Background</div>
+          <div class="cm-bgs" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;"></div>
+          <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:800; font-size:14px; margin:0 0 8px; line-height:1.4;"></div>
+          <img class="cm-preview" style="width:100%; max-width:360px; display:block; margin:0 auto; border-radius:8px; background:#fff; min-height:120px;">
+          <div class="cm-aiinfo" style="text-align:center; color:#8a8a8a; font-size:12px; margin-top:6px;"></div>
+          <div style="margin-top:10px; font-size:13px; font-weight:700;">
+            <label style="display:block;">⬆⬇ Trophy up / down <span class="cm-lift-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-lift" min="-60" max="60" step="1" value="0" style="width:100%;">
+            <label style="display:block; margin-top:6px;">🔍 Trophy size <span class="cm-grow-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-grow" min="40" max="250" step="1" value="100" style="width:100%;">
+            <label style="display:block; margin-top:10px;">✂️ Cut reflection under the TROPHY <span class="cm-ctop-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-ctop" min="0" max="45" step="1" value="0" style="width:100%;">
+            <label style="display:block; margin-top:6px;">✂️ Cut reflection under the BASE <span class="cm-cbot-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-cbot" min="0" max="45" step="1" value="0" style="width:100%;">
+            <div style="color:#8a8a8a; font-weight:400; font-size:12px; margin-top:2px;">Slide right until the shiny copy under the trophy / base disappears. Remembered for each part.</div>
+            <button type="button" class="cm-reset-adj" style="margin-top:6px; background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:6px 12px; font-weight:800; font-size:12px;">Reset position</button>
+          </div>
+        </div>
+
+        <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
+          <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">SAVE AS PRODUCT</div>
+          <label style="font-size:11px; color:#a9a9a9; font-weight:700;">Model No. / name</label>
+          <input type="text" class="cm-name" style="${inp} margin-bottom:8px;">
+          <div style="display:flex; gap:8px;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Size</label><input type="text" class="cm-code" style="${inp}"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Height (inch)</label><input type="text" class="cm-inch" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">MRP (₹)</label><input type="text" class="cm-mrp" style="${inp}" inputmode="numeric"></div>
+          </div>
+          <label style="font-size:11px; color:#a9a9a9; font-weight:700; display:block; margin-top:8px;">Save into catalogue</label>
+          <select class="cm-dest" style="${inp}"></select>
+          <button type="button" class="cm-save" style="width:100%; margin-top:12px; padding:14px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:16px;">💾 Save Combo Product</button>
+          <div class="cm-status" style="text-align:center; color:#7cd992; font-weight:700; font-size:13px; margin-top:8px;"></div>
+        </div>
+      </div>
+      <div class="cm-picker" style="display:none; position:fixed; inset:0; z-index:9001; background:#050505; overflow:auto; padding:14px;">
+        <div style="max-width:520px; margin:0 auto;">
+          <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+            <div class="cm-pk-title" style="flex:1; font-weight:800; color:#f0c341; font-size:16px;"></div>
+            <button type="button" class="cm-pk-close" style="background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:8px 14px; font-weight:800;">✕</button>
+          </div>
+          <input type="text" class="cm-pk-search" placeholder="🔍 Search model no..." style="${inp} margin-bottom:10px;">
+          <div class="cm-pk-sizes" style="display:none; margin-bottom:10px;"></div>
+          <div class="cm-pk-grid" style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(comboModal);
+    const q = (s) => comboModal.querySelector(s);
+    q('.cm-close').onclick = () => { comboModal.style.display = 'none'; document.body.style.overflow = ''; };
+    q('.cm-pk-close').onclick = () => { q('.cm-picker').style.display = 'none'; };
+    q('.cm-addpart').onclick = () => { if (comboState.parts.length >= 4) { alert('Up to 4 parts.'); return; } comboState.parts.push(null); comboRenderParts(); };
+    q('.cm-src').onchange = () => { comboState.src = q('.cm-src').value; comboLsSet('shopapp-combo-src', comboState.src); };
+    [['.cm-less', 'shopapp-combo-less'], ['.cm-margin', 'shopapp-combo-margin'], ['.cm-cust', 'shopapp-combo-cust']].forEach(([sel, key]) => {
+      q(sel).oninput = () => { comboLsSet(key, q(sel).value); comboCalc(true); };
+    });
+    const adjLabels = () => { q('.cm-lift-v').textContent = (q('.cm-lift').value > 0 ? '+' : '') + q('.cm-lift').value; q('.cm-grow-v').textContent = q('.cm-grow').value + '%'; };
+    q('.cm-lift').oninput = () => { adjLabels(); comboDraw(); };
+    q('.cm-grow').oninput = () => { adjLabels(); comboDraw(); };
+    q('.cm-reset-adj').onclick = () => { q('.cm-lift').value = 0; q('.cm-grow').value = 100; adjLabels(); comboDraw(); };
+    const cropSlider = (sel, which) => {
+      q(sel).oninput = () => {
+        const parts = comboState.parts.filter(Boolean); const p = which === 'top' ? parts[0] : parts[parts.length - 1];
+        if (p) comboLsSet(comboCropKey(p), q(sel).value);
+        q(sel + '-v').textContent = q(sel).value + '%'; comboDraw();
+      };
+    };
+    cropSlider('.cm-ctop', 'top'); cropSlider('.cm-cbot', 'bottom');
+    adjLabels();
+    q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
+    q('.cm-fill').checked = comboLs('shopapp-combo-fill', '1') === '1';
+    q('.cm-fill').onchange = () => { comboLsSet('shopapp-combo-fill', q('.cm-fill').checked ? '1' : '0'); comboRebuild(); };
+    q('.cm-ai').onchange = () => { comboLsSet('shopapp-combo-ai', q('.cm-ai').checked ? '1' : '0'); comboRebuild(); };
+    q('.cm-rod').oninput = () => comboCalc(true);
+    q('.cm-rodtype').onchange = () => { comboLsSet('shopapp-combo-rodtype', q('.cm-rodtype').value); comboCalc(true); };
+    q('.cm-rodtype').value = comboLs('shopapp-combo-rodtype', 'cost');
+    q('.cm-round').onchange = () => { comboLsSet('shopapp-combo-round', q('.cm-round').checked ? '1' : '0'); comboCalc(true); };
+    q('.cm-dest').onchange = async () => {
+      if (q('.cm-dest').value === '__new'){
+        const nm = (prompt('Name for the new catalogue (e.g. COMBO):', 'COMBO') || '').trim();
+        if (!nm){ q('.cm-dest').value = currentCatalogueId; return; }
+        const cat = { id: makeId(), name: nm };
+        catalogues.push(cat); await saveCatalogueList(); renderCatalogueSelect();
+        comboFillDest(cat.id);
+      }
+      comboLsSet('shopapp-combo-dest', q('.cm-dest').value);
+    };
+    q('.cm-pk-search').oninput = () => comboRenderPickerGrid();
+    q('.cm-save').onclick = comboSave;
+  }
+  const q = (s) => comboModal.querySelector(s);
+  comboState.cache = {};
+  comboState.src = comboDefaultSource();
+  q('.cm-src').innerHTML = catalogues.map(c => '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>').join('');
+  q('.cm-src').value = comboState.src;
+  q('.cm-less').value = comboLs('shopapp-combo-less', '60');
+  q('.cm-margin').value = comboLs('shopapp-combo-margin', '40');
+  q('.cm-cust').value = comboLs('shopapp-combo-cust', '60');
+  q('.cm-round').checked = comboLs('shopapp-combo-round', '1') === '1';
+  const destDefault = comboLs('shopapp-combo-dest', '') ;
+  const combo = catalogues.find(c => /combo/i.test(c.name));
+  comboFillDest(catalogues.some(c => c.id === destDefault) ? destDefault : (combo ? combo.id : currentCatalogueId));
+  q('.cm-status').textContent = '';
+  q('.cm-rod').value = '';
+  comboModal.style.display = 'block'; document.body.style.overflow = 'hidden';
+  comboRenderBgChips();
+  comboRenderParts();
+}
+function comboFillDest(sel){
+  const d = comboModal.querySelector('.cm-dest');
+  d.innerHTML = catalogues.map(c => '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>').join('') + '<option value="__new">+ New catalogue…</option>';
+  d.value = sel;
+}
+function comboPartLabel(i, n){
+  if (i === 0) return 'Part 1 — TOP (statue / figure)';
+  if (i === n - 1) return 'Part ' + (i + 1) + ' — BOTTOM (base)';
+  return 'Part ' + (i + 1) + ' — middle';
+}
+function comboRenderParts(){
+  const box = comboModal.querySelector('.cm-parts');
+  box.innerHTML = '';
+  const n = comboState.parts.length;
+  comboState.parts.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:10px; background:#141414; border:1.5px solid ' + (p ? '#b8912f' : '#2c2c2c') + '; border-radius:10px; padding:10px; margin-bottom:8px;';
+    row.innerHTML = `
+      <div style="width:64px; height:64px; flex-shrink:0; border-radius:6px; background:#fff; overflow:hidden; display:flex; align-items:center; justify-content:center;">${p ? `<img src="${itemPhoto(p.item)}" style="max-width:100%; max-height:100%;">` : '<span style="color:#999; font-size:24px;">＋</span>'}</div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:11px; font-weight:800; color:#a9a9a9; letter-spacing:0.5px;">${escapeHtml(comboPartLabel(i, n))}</div>
+        <div style="font-size:15px; font-weight:800; color:#fff; margin-top:2px;">${p ? escapeHtml(p.item.name) + ' — Size ' + escapeHtml(p.v.code || '-') : 'Not chosen yet'}</div>
+        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}</div>
+        <div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; font-weight:700; color:${comboPartInch(p) ? '#c9c9c9' : '#e0705a'};">Real height <input type="number" class="cm-pinch" inputmode="decimal" value="${comboPartInch(p) || ''}" placeholder="?" style="width:62px; padding:5px; border-radius:5px; border:1.5px solid ${comboPartInch(p) ? '#555' : '#e0705a'}; background:#0b0b0b; color:#fff; font-weight:800; font-size:13px; text-align:center;"> inch${comboPartInch(p) ? '' : ' ⚠️ enter it'}</div>` : ''}
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <button type="button" class="cm-choose" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:8px 10px; font-weight:800; font-size:12px;">${p ? 'Change' : 'Choose'}</button>
+        ${n > 2 ? '<button type="button" class="cm-remove" style="background:none; color:#e0705a; border:1.5px solid #e0705a; border-radius:6px; padding:6px 10px; font-weight:800; font-size:12px;">Remove</button>' : ''}
+      </div>`;
+    row.querySelector('.cm-choose').onclick = () => comboOpenPicker(i);
+    const pin = row.querySelector('.cm-pinch');
+    if (pin) pin.onchange = () => {
+      const v = parseFloat(pin.value);
+      comboLsSet(comboInchKey(p), v > 0 ? String(v) : '');
+      (comboState.layers || []).forEach(l => { if (l.part === p) l.inch = comboPartInch(p); });
+      comboRenderParts(); comboDraw();
+    };
+    const rm = row.querySelector('.cm-remove'); if (rm) rm.onclick = () => { comboState.parts.splice(i, 1); comboRenderParts(); comboRebuild(); };
+    box.appendChild(row);
+  });
+  comboCalc(false);
+}
+let comboPickSlot = 0, comboPickItems = [];
+async function comboOpenPicker(slot){
+  comboPickSlot = slot;
+  const q = (s) => comboModal.querySelector(s);
+  q('.cm-picker').style.display = 'block';
+  q('.cm-pk-title').textContent = 'Choose ' + comboPartLabel(slot, comboState.parts.length);
+  q('.cm-pk-sizes').style.display = 'none';
+  q('.cm-pk-search').value = '';
+  q('.cm-pk-grid').innerHTML = '<div style="grid-column:1/-1; color:#999; text-align:center; padding:20px;">Loading...</div>';
+  try { comboPickItems = await comboLoadCatalogueItems(comboState.src); }
+  catch (e) { q('.cm-pk-grid').innerHTML = '<div style="grid-column:1/-1; color:#e0705a; text-align:center; padding:20px;">Could not load — check internet.</div>'; return; }
+  comboRenderPickerGrid();
+}
+function comboRenderPickerGrid(){
+  const q = (s) => comboModal.querySelector(s);
+  const s = q('.cm-pk-search').value.trim().toLowerCase();
+  const list = comboPickItems.filter(it => !s || String(it.name).toLowerCase().includes(s) || (it.variations || []).some(v => String(v.code || '').toLowerCase().includes(s)));
+  const grid = q('.cm-pk-grid');
+  grid.innerHTML = list.length ? '' : '<div style="grid-column:1/-1; color:#999; text-align:center; padding:20px;">No products found.</div>';
+  list.forEach(it => {
+    const d = document.createElement('div');
+    d.style.cssText = 'background:#0b0b0b; border:2px solid #262626; border-radius:8px; overflow:hidden; cursor:pointer;';
+    d.innerHTML = '<img style="width:100%; height:92px; object-fit:contain; background:#fff; display:block;"><div style="font-size:12px; font-weight:800; padding:5px; color:#ddd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></div>';
+    d.querySelector('img').src = itemPhoto(it); d.querySelector('div').textContent = it.name;
+    d.onclick = () => comboShowSizes(it);
+    grid.appendChild(d);
+  });
+}
+function comboShowSizes(it){
+  const q = (s) => comboModal.querySelector(s);
+  const box = q('.cm-pk-sizes');
+  const vars = (it.variations || []).filter(v => v.code || v.inch || v.price);
+  box.style.display = 'block';
+  box.innerHTML = '<div style="font-weight:800; color:#fff; margin-bottom:6px;">' + escapeHtml(it.name) + ' — pick the size:</div>';
+  const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex; flex-wrap:wrap; gap:8px;';
+  (vars.length ? vars : [{ code: '', inch: '', price: '' }]).forEach(v => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.style.cssText = 'padding:10px 14px; border-radius:8px; border:2px solid #f0c341; background:#141414; color:#f0c341; font-weight:800; font-size:14px;' + (v.outOfStock ? ' opacity:0.5;' : '');
+    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
+    b.onclick = () => { comboState.parts[comboPickSlot] = { item: it, v, catId: comboState.src }; q('.cm-picker').style.display = 'none'; comboRenderParts(); comboRebuild(); };
+    wrap.appendChild(b);
+  });
+  box.appendChild(wrap);
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+function comboCalc(keepUserMrp){
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  const less = parseFloat(q('.cm-less').value) || 0, margin = parseFloat(q('.cm-margin').value) || 0, cust = parseFloat(q('.cm-cust').value) || 0;
+  const loose = parts.reduce((a, p) => a + comboPrice(p.v), 0);
+  const rod = Math.max(0, parseFloat(q('.cm-rod').value) || 0);
+  const rodIsMrp = q('.cm-rodtype').value === 'mrp';
+  const rodCost = rodIsMrp ? rod * (1 - less / 100) : rod;
+  const cost = loose * (1 - less / 100) + rodCost;
+  const sell = cost * (1 + margin / 100);
+  let mrp = cust < 100 ? sell / (1 - cust / 100) : 0;
+  if (q('.cm-round').checked) mrp = Math.ceil(mrp / 10) * 10; else mrp = Math.round(mrp);
+  const r = (n) => '₹' + (Math.round(n * 100) / 100).toLocaleString('en-IN');
+  q('.cm-calc').innerHTML = parts.length ? (
+    parts.map(p => '<div style="display:flex; justify-content:space-between;"><span>' + escapeHtml(p.item.name) + ' (' + escapeHtml(p.v.code || '-') + ')</span><span>' + r(comboPrice(p.v)) + '</span></div>').join('') +
+    '<div style="display:flex; justify-content:space-between; border-top:1px solid #333; margin-top:4px; padding-top:4px;"><span>Loose MRP total</span><b>' + r(loose) + '</b></div>' +
+    (rod > 0 ? '<div style="display:flex; justify-content:space-between;"><span>Loose parts after −' + less + '%</span><span>' + r(loose * (1 - less / 100)) + '</span></div>' +
+      '<div style="display:flex; justify-content:space-between;"><span>+ 🔩 Rod' + (rodIsMrp ? ' (₹' + rod + ' −' + less + '%)' : '') + '</span><span>' + r(rodCost) + '</span></div>' +
+      '<div style="display:flex; justify-content:space-between;"><span>Your total cost</span><span>' + r(cost) + '</span></div>'
+    : '<div style="display:flex; justify-content:space-between;"><span>Your cost (−' + less + '%)</span><span>' + r(cost) + '</span></div>') +
+    '<div style="display:flex; justify-content:space-between;"><span>+ Margin ' + margin + '% = you get</span><b style="color:#7cd992;">' + r(sell) + '</b></div>' +
+    '<div style="display:flex; justify-content:space-between; font-size:17px; color:#f0c341; margin-top:4px;"><b>New MRP</b><b>' + r(mrp) + '</b></div>' +
+    '<div style="color:#a9a9a9; font-size:12px;">After ' + cust + '% off the customer pays ' + r(mrp * (1 - cust / 100)) + '</div>'
+  ) : '<span style="color:#888;">Choose the parts to see the price.</span>';
+  comboState.mrp = mrp;
+  q('.cm-mrp').value = parts.length ? mrp : '';
+  // default name / height
+  const inch = parts.reduce((a, p) => a + comboPartInch(p), 0);
+  q('.cm-inch').value = inch ? String(Math.round(inch * 100) / 100) : '';
+  if (!q('.cm-name').dataset.touched) q('.cm-name').value = parts.map(p => p.item.name + (p.v.code ? '-' + p.v.code : '')).join(' + ');
+  if (!q('.cm-code').value) q('.cm-code').value = 'A';
+  q('.cm-name').oninput = () => { q('.cm-name').dataset.touched = '1'; };
+}
+let comboRunId = 0, comboImage = '', comboAiError = false;
+async function comboRebuild(){
+  const my = ++comboRunId;
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  comboImage = ''; comboAiError = false;
+  if (!parts.length){ q('.cm-preview').removeAttribute('src'); return; }
+  q('.cm-pstatus').textContent = '⏳ Joining photos...';
+  const layers = [];
+  for (const p of parts){
+    const full = await fetchFullPhoto(p.catId, p.item);
+    const im = await adLoadImage(full);
+    if (!im) continue;
+    let cut = adCutout(im);   // quick: plain white background
+    if (!cut && comboModal.querySelector('.cm-ai').checked){
+      try { cut = await smartCutout(full, p.catId + ':' + p.item.id, (msg) => { if (my === comboRunId) q('.cm-pstatus').textContent = msg; }); }
+      catch (e) { console.error('Smart background removal failed:', e); q('.cm-pstatus').textContent = '⚠️ Background could not be removed: ' + (e && e.message ? e.message : e) + ' — please send a screenshot of this message.'; comboAiError = true; }
+      if (my !== comboRunId) return;
+    }
+    let method = cut ? 'cut out' : 'NOT cut out';
+    if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
+    layers.push({ cut, part: p, inch: comboPartInch(p) || 0, info: p.item.name + ': ' + method });
+  }
+  if (my !== comboRunId) return;
+  comboState.layers = layers;
+  comboSyncCropSliders();
+  if (!comboAiError) q('.cm-pstatus').textContent = '';
+  q('.cm-aiinfo').textContent = layers.map(l => l.info).join(' · ') + (q('.cm-ai').checked ? '' : ' · (AI is switched off)');
+  comboDraw();
+}
+// Removes the faint mirror-reflection under a cut-out product (AI keeps it,
+// so the trophy would float above the base). Real product rows are almost
+// fully solid; reflection rows are see-through.
+function cutReflection(cv){
+  const w = cv.width, h = cv.height;
+  let d;
+  try { d = cv.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return cv; }
+  // The AI keeps the mirror reflection under the product as see-through
+  // pixels; the product itself is solid. Find the lowest solid rows.
+  const step = Math.max(1, Math.round(w / 300));
+  let bottom = h - 1;
+  for (let y = h - 1, run = 0; y > h * 0.35; y--){
+    let any = 0, strong = 0;
+    for (let x = 0; x < w; x += step){ const a = d[(y * w + x) * 4 + 3]; if (a > 20){ any++; if (a > 200) strong++; } }
+    if (any > 0 && strong >= 2 && strong / any > 0.7){ if (++run >= 3){ bottom = y + 2; break; } } else run = 0;
+  }
+  if (bottom >= h - 3) return cv;
+  const t = document.createElement('canvas'); t.width = w; t.height = bottom + 1;
+  t.getContext('2d').drawImage(cv, 0, 0, w, bottom + 1, 0, 0, w, bottom + 1);
+  return t;
+}
+window.__comboTest = { cutReflection: (c) => cutReflection(c), fillEnclosedHoles: (a, b) => fillEnclosedHoles(a, b) };
+// Background scenes for the combo photo (drawn, so they work offline and never cost anything)
+const COMBO_BGS = [['white', 'White'], ['gold', '✨ Luxury Gold'], ['dark', '🖤 Royal Dark'], ['studio', '📷 Studio Grey'], ['velvet', '❤️ Red Velvet'], ['blue', '💙 Royal Blue']];
+function comboPaintScene(ctx, W, H, floorY, name){
+  const rnd = (() => { let x = 12345; return () => (x = x * 16807 % 2147483647) / 2147483647; })();
+  const bokeh = (count, col, maxA, yMax) => {
+    for (let i = 0; i < count; i++){
+      const x = rnd() * W, y = rnd() * yMax, r = 14 + rnd() * 60, a = 0.05 + rnd() * maxA;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, 'rgba(' + col + ',' + a + ')'); g.addColorStop(0.6, 'rgba(' + col + ',' + a * 0.5 + ')'); g.addColorStop(1, 'rgba(' + col + ',0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  };
+  const lin = (y0, y1, stops) => { const g = ctx.createLinearGradient(0, y0, 0, y1); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+  const rad = (cx, cy, r0, r1, stops) => { const g = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+  if (name === 'white'){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); return; }
+  if (name === 'gold'){
+    ctx.fillStyle = rad(W * 0.5, H * 0.38, 40, H * 0.8, [[0, '#7a5518'], [0.45, '#2e1e08'], [1, '#0b0703']]); ctx.fillRect(0, 0, W, H);
+    // warm light pillars like a showroom
+    [[0.12, 0.10], [0.88, 0.10]].forEach(([fx, wv]) => { ctx.fillStyle = lin(0, floorY, [[0, 'rgba(255,200,110,0.0)'], [0.4, 'rgba(255,200,110,0.22)'], [1, 'rgba(255,200,110,0.05)']]); ctx.fillRect(W * fx - W * wv / 2, 0, W * wv, floorY); });
+    bokeh(46, '255,205,120', 0.32, floorY);
+    ctx.fillStyle = lin(floorY - 30, H, [[0, '#d9cbb3'], [0.25, '#efe6d6'], [1, '#a8957a']]); ctx.fillRect(0, floorY - 30, W, H - floorY + 30);
+    ctx.strokeStyle = 'rgba(120,100,80,0.18)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 9; i++){ ctx.beginPath(); const x0 = rnd() * W; ctx.moveTo(x0, floorY - 20); ctx.bezierCurveTo(x0 + 120 * (rnd() - 0.5), floorY + 60, x0 + 200 * (rnd() - 0.5), floorY + 140, x0 + 260 * (rnd() - 0.5), H); ctx.stroke(); }
+    ctx.fillStyle = lin(floorY - 40, floorY + 10, [[0, 'rgba(255,220,160,0)'], [1, 'rgba(255,220,160,0.35)']]); ctx.fillRect(0, floorY - 40, W, 50);
+    return;
+  }
+  if (name === 'dark'){
+    ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = rad(W / 2, H * 0.35, 30, H * 0.6, [[0, 'rgba(255,240,210,0.22)'], [1, 'rgba(255,240,210,0)']]); ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = lin(0, floorY, [[0, 'rgba(255,236,190,0.16)'], [1, 'rgba(255,236,190,0.02)']]);
+    ctx.beginPath(); ctx.moveTo(W / 2 - 90, 0); ctx.lineTo(W / 2 + 90, 0); ctx.lineTo(W / 2 + 380, floorY); ctx.lineTo(W / 2 - 380, floorY); ctx.closePath(); ctx.fill();
+    bokeh(18, '255,215,150', 0.12, floorY * 0.9);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#1d1d1f'], [1, '#050505']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.save(); ctx.translate(W / 2, floorY); ctx.scale(1, 0.18); ctx.fillStyle = rad(0, 0, 10, 420, [[0, 'rgba(255,230,180,0.35)'], [1, 'rgba(255,230,180,0)']]); ctx.beginPath(); ctx.arc(0, 0, 420, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    return;
+  }
+  if (name === 'studio'){
+    ctx.fillStyle = rad(W / 2, H * 0.35, 50, H * 0.9, [[0, '#ffffff'], [1, '#cfd3d8']]); ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = lin(floorY - 60, H, [[0, 'rgba(210,214,220,0)'], [0.3, '#dfe2e6'], [1, '#bfc4ca']]); ctx.fillRect(0, floorY - 60, W, H - floorY + 60);
+    return;
+  }
+  if (name === 'velvet'){
+    ctx.fillStyle = rad(W / 2, H * 0.36, 40, H * 0.85, [[0, '#8e1b24'], [0.5, '#4a0a10'], [1, '#170204']]); ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 14; i++){ const x = (i + 0.5) * W / 14; ctx.fillStyle = lin(0, floorY, [[0, 'rgba(0,0,0,0.0)'], [1, 'rgba(0,0,0,0.18)']]); ctx.fillRect(x - 10, 0, 20, floorY); }   // curtain folds
+    bokeh(22, '255,200,150', 0.14, floorY);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#5a3418'], [0.4, '#3e2310'], [1, '#1d0f06']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 2;
+    for (let y = floorY + 10; y < H; y += 26){ ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y + 6); ctx.stroke(); }
+    return;
+  }
+  if (name === 'blue'){
+    ctx.fillStyle = rad(W / 2, H * 0.36, 40, H * 0.85, [[0, '#1f4fa8'], [0.5, '#0c2457'], [1, '#040a1c']]); ctx.fillRect(0, 0, W, H);
+    bokeh(40, '170,210,255', 0.22, floorY);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#1b2d55'], [1, '#050b1a']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.save(); ctx.translate(W / 2, floorY); ctx.scale(1, 0.18); ctx.fillStyle = rad(0, 0, 10, 420, [[0, 'rgba(180,215,255,0.35)'], [1, 'rgba(180,215,255,0)']]); ctx.beginPath(); ctx.arc(0, 0, 420, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    return;
+  }
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+}
+function comboRenderBgChips(){
+  const box = comboModal.querySelector('.cm-bgs'); if (!box) return;
+  const cur = comboLs('shopapp-combo-bg', 'white');
+  box.innerHTML = '';
+  COMBO_BGS.forEach(([id, label]) => {
+    const b = document.createElement('button'); b.type = 'button';
+    const on = id === cur;
+    b.style.cssText = 'padding:8px 12px; border-radius:16px; font-weight:800; font-size:13px; border:2px solid ' + (on ? '#f0c341' : '#444') + '; background:' + (on ? '#f0c341' : '#141414') + '; color:' + (on ? '#000' : '#ddd') + ';';
+    b.textContent = label;
+    b.onclick = () => { comboLsSet('shopapp-combo-bg', id); comboRenderBgChips(); comboDraw(); };
+    box.appendChild(b);
+  });
+}
+
+function comboDraw(){
+  const q = (s) => comboModal.querySelector(s);
+  const layersRaw = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
+  if (!layersRaw.length) return;
+  // manual reflection cut (from the ✂️ sliders): crop that share off the bottom
+  const cTop = (parseFloat(q('.cm-ctop').value) || 0) / 100, cBot = (parseFloat(q('.cm-cbot').value) || 0) / 100;
+  const layers = layersRaw.map((l, i) => {
+    const pct = i === 0 ? cTop : (i === layersRaw.length - 1 ? cBot : 0);
+    if (!pct) return l;
+    const hh = Math.max(1, Math.round(l.cut.height * (1 - pct)));
+    const t = document.createElement('canvas'); t.width = l.cut.width; t.height = hh;
+    t.getContext('2d').drawImage(l.cut, 0, 0, l.cut.width, hh, 0, 0, l.cut.width, hh);
+    return Object.assign({}, l, { cut: t });
+  });
+  const lift = (parseFloat(q('.cm-lift').value) || 0) / 100;   // top part up(+)/down(−), share of the part below
+  const grow = (parseFloat(q('.cm-grow').value) || 100) / 100; // top part size
+  // heights: by inches when known, else by the photo's own proportion
+  const known = layers.filter(l => l.inch > 0);
+  const avgPxPerInch = known.length ? known.reduce((a, l) => a + l.cut.height / l.inch, 0) / known.length : 0;
+  layers.forEach(l => { l.h = l.inch > 0 ? l.inch : (avgPxPerInch ? l.cut.height / avgPxPerInch : 4); });
+  if (layers.length > 1) layers[0].h *= grow;
+  const W = 1000, H = 1300, M = 60, sink = 0.06; // upper part stands slightly into the top face of the part below
+  const totalIn = layers.reduce((a, l, i) => a + (i === layers.length - 1 ? l.h : 0), 0) +
+    layers.slice(0, -1).reduce((a, l, i) => a + l.h, 0) - layers.slice(1).reduce((a, l, i) => a + l.h * (i === 0 ? sink - lift : sink), 0);
+  // scale is worked out without the up/down nudge, so moving the trophy never resizes everything
+  const totalNoLift = totalIn - (layers.length > 1 ? layers[1].h * lift : 0);
+  let k = (H - 2 * M) / Math.max(1, totalNoLift);
+  layers.forEach(l => { const w = l.cut.width * (l.h * k) / l.cut.height; if (w > W - 2 * M) k = Math.min(k, (W - 2 * M) * l.cut.height / (l.cut.width * l.h)); });
+  const bgName = comboLs('shopapp-combo-bg', 'white');
+  const onScene = bgName !== 'white';
+  if (onScene) k *= 0.86;                       // leave room for the floor
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  // 1) the trophy stack on a transparent layer
+  const stack = document.createElement('canvas'); stack.width = W; stack.height = H;
+  const sx = stack.getContext('2d');
+  const floorY = onScene ? Math.round(H * 0.84) : (H + totalIn * k) / 2;
+  let bottom = floorY;
+  const last = layers[layers.length - 1];
+  const baseW = last.cut.width * (last.h * k) / last.cut.height;
+  for (let i = layers.length - 1; i >= 0; i--){
+    const l = layers[i]; const h = l.h * k; const w = l.cut.width * h / l.cut.height;
+    sx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
+    const s2 = (i === 1) ? sink - lift : sink;   // joint between part 1 (top) and part 2
+    bottom = bottom - h * (1 - s2);
+  }
+  // 2) background scene, 3) reflection + contact shadow, 4) trophy
+  comboPaintScene(ctx, W, H, floorY, bgName);
+  const glossy = { gold: 0.22, dark: 0.26, studio: 0.12, velvet: 0.18, blue: 0.24 }[bgName] || 0;
+  if (glossy){
+    const r = document.createElement('canvas'); r.width = W; r.height = H; const rx = r.getContext('2d');
+    rx.translate(0, floorY * 2); rx.scale(1, -1); rx.drawImage(stack, 0, 0); rx.setTransform(1, 0, 0, 1, 0, 0);
+    rx.globalCompositeOperation = 'destination-in';
+    const fade = rx.createLinearGradient(0, floorY, 0, floorY + H * 0.16);
+    fade.addColorStop(0, 'rgba(0,0,0,' + glossy + ')'); fade.addColorStop(1, 'rgba(0,0,0,0)');
+    rx.fillStyle = fade; rx.fillRect(0, floorY, W, H - floorY);
+    ctx.drawImage(r, 0, 0);
+  }
+  ctx.save();
+  ctx.filter = 'blur(10px)';
+  ctx.fillStyle = onScene ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.14)';
+  ctx.beginPath(); ctx.ellipse(W / 2, floorY - 2, baseW * 0.52, onScene ? 18 : 14, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  ctx.drawImage(stack, 0, 0);
+  if (onScene){   // soft light from above + gentle vignette, so it feels like one photo
+    const vg = ctx.createRadialGradient(W / 2, H * 0.42, H * 0.25, W / 2, H * 0.5, H * 0.8);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,' + (bgName === 'studio' ? 0.12 : 0.35) + ')');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  }
+  comboImage = c.toDataURL('image/jpeg', 0.92);
+  q('.cm-preview').src = comboImage;
+}
+async function comboSave(){
+  const q = (s) => comboModal.querySelector(s);
+  if (comboState.parts.some(p => !p)){ alert('Please choose every part first (or Remove the empty one).'); return; }
+  if (!comboImage){ alert('The photo is still being made — wait a moment.'); return; }
+  const name = q('.cm-name').value.trim();
+  if (!name){ alert('Please enter a model number / name.'); return; }
+  const variation = { code: q('.cm-code').value.trim(), inch: q('.cm-inch').value.trim(), price: q('.cm-mrp').value.trim() };
+  const destId = q('.cm-dest').value;
+  const btn = q('.cm-save'); btn.disabled = true; q('.cm-status').style.color = '#f0c341'; q('.cm-status').textContent = '⏳ Saving...';
+  try {
+    const parts = comboState.parts.map(p => ({ name: p.item.name, size: p.v.code || '', inch: p.v.inch || '', mrp: p.v.price || '' }));
+    const rodVal = parseFloat(q('.cm-rod').value) || 0;
+    if (rodVal > 0) parts.push({ name: 'ROD', rodPrice: rodVal, rodType: q('.cm-rodtype').value });
+    if (destId === currentCatalogueId){
+      if (itemsLoadFailed) throw new Error('This catalogue did not load properly — tap Refresh first.');
+      const existing = items.find(i => i.name.trim().toUpperCase() === name.toUpperCase());
+      if (existing && confirm('"' + name + '" already exists here. Add this as another size to it?\n\nOK = add size · Cancel = stop')){
+        existing.variations = (existing.variations || []).concat([variation]);
+        renderGrid(); await saveItemToStorage(existing);
+      } else if (existing){ throw new Error('cancelled'); }
+      else {
+        const it = { id: Date.now(), dataUrl: comboImage, name, variations: [variation], comboParts: parts };
+        items.push(it); photoDirty.add(it.id); renderGrid(); await saveItemToStorage(it);
+      }
+    } else {
+      const list = await comboLoadCatalogueItems(destId).catch(() => null);
+      if (!list) throw new Error('Could not open that catalogue — check internet.');
+      const existing = list.find(i => String(i.name).trim().toUpperCase() === name.toUpperCase());
+      if (existing){
+        if (!confirm('"' + name + '" already exists there. Add this as another size to it?')) throw new Error('cancelled');
+        existing.variations = (existing.variations || []).concat([variation]);
+        const light = { ...existing }; delete light.dataUrl;
+        await storage.set(itemKey(destId, existing.id), JSON.stringify(light), true);
+      } else {
+        const it = { id: Date.now(), dataUrl: comboImage, name, variations: [variation], comboParts: parts };
+        const { light, full } = await splitItem(it);
+        if (full) await storage.set(photoKey(destId, it.id), full);   // photo first
+        await storage.set(itemKey(destId, it.id), JSON.stringify(light), true);
+        const idx = await storage.get(indexKey(destId));
+        const ids = idx && idx.value ? JSON.parse(idx.value) : [];
+        ids.push(it.id);
+        await storage.set(indexKey(destId), JSON.stringify(ids), true);
+        list.push(light);
+      }
+    }
+    const destName = (catalogues.find(c => c.id === destId) || {}).name || '';
+    q('.cm-status').style.color = '#7cd992';
+    q('.cm-status').textContent = '✅ Saved "' + name + '" (' + (variation.code ? 'Size ' + variation.code + ', ' : '') + (variation.inch ? variation.inch + '", ' : '') + 'MRP ₹' + variation.price + ') in ' + destName + '. Choose new parts to make the next one.';
+    q('.cm-name').dataset.touched = '';
+  } catch (e) {
+    if (e && e.message === 'cancelled'){ q('.cm-status').textContent = ''; }
+    else { console.error(e); q('.cm-status').style.color = '#e0705a'; q('.cm-status').textContent = '⚠️ Not saved: ' + (e && e.message ? e.message : e); }
+  } finally { btn.disabled = false; }
+}
+
+
+(async function startCombo(){
+  const msg = document.getElementById('combo-loading');
+  try {
+    const r = await storage.get('catalogue-list');
+    catalogues = r && r.value ? JSON.parse(r.value) : [];
+  } catch (e) { msg.textContent = '⚠️ Could not load your catalogues — check the internet and reopen.'; return; }
+  if (!catalogues.length){ msg.textContent = 'No catalogues yet — add products in the Catalogue app first.'; return; }
+  msg.style.display = 'none';
+  openComboMaker();
+  const close = comboModal.querySelector('.cm-close');
+  close.textContent = '📚 Catalogue';
+  close.onclick = () => { location.href = 'catalogue.html'; };
+  comboModal.style.top = document.getElementById('app-topbar').offsetHeight + 'px';
+})();
+</script>
+</body>
+</html>
