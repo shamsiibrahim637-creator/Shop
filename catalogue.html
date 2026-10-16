@@ -2059,7 +2059,20 @@ function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^
 function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
 
 // ---- AI background removal (runs on the phone; the AI is downloaded once) ----
-const SMART_BG_LIB = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/+esm';
+// Tried in order; the first one that loads is used.
+const SMART_BG_LIBS = [
+  'https://esm.sh/@imgly/background-removal@1.7.0?deps=onnxruntime-web@1.21.0',
+  'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm',
+  'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/+esm'
+];
+async function loadSmartBgLib(){
+  let lastErr = null;
+  for (const u of SMART_BG_LIBS){
+    try { const lib = await import(u); const fn = lib.removeBackground || (lib.default && lib.default.removeBackground) || lib.default; if (typeof fn === 'function') return { fn, url: u }; }
+    catch (e) { lastErr = e; console.warn('Background-removal library failed from', u, e); }
+  }
+  throw lastErr || new Error('library not available');
+}
 const smartCutCache = new Map();
 function cutoutDb(){
   return new Promise((res, rej) => { const r = indexedDB.open('shopapp-cutouts', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
@@ -2083,15 +2096,21 @@ async function smartCutout(dataUrl, key, onStatus){
   let blob = await cutoutDbGet(fingerprint);
   if (!blob){
     onStatus('⏳ Loading the background-removal AI… (first time takes a minute)');
-    if (!window.__smartBgLib) window.__smartBgLib = import(SMART_BG_LIB);
+    if (!window.__smartBgLib) window.__smartBgLib = loadSmartBgLib();
     let lib;
-    try { lib = await window.__smartBgLib; } catch (e) { window.__smartBgLib = null; throw e; }
-    const removeBackground = lib.removeBackground || (lib.default && lib.default.removeBackground) || lib.default;
+    try { lib = await window.__smartBgLib; } catch (e) { window.__smartBgLib = null; throw new Error('could not load the AI (' + (e && e.message ? e.message : e) + ')'); }
     const src = await (await fetch(dataUrl)).blob();
-    blob = await removeBackground(src, {
-      output: { format: 'image/png' },
-      progress: (k, cur, total) => { if (total) onStatus('⏳ Downloading AI… ' + Math.round(cur / total * 100) + '%'); }
-    });
+    let lastErr = null;
+    for (const opts of [{ device: 'cpu', model: 'isnet_quint8' }, {}]){
+      try {
+        blob = await lib.fn(src, Object.assign({
+          output: { format: 'image/png' },
+          progress: (k, cur, total) => { if (total) onStatus('⏳ Downloading AI… ' + Math.round(cur / total * 100) + '%'); }
+        }, opts));
+        if (blob) break;
+      } catch (e) { lastErr = e; console.warn('removeBackground failed with', opts, e); }
+    }
+    if (!blob) throw lastErr || new Error('no result');
     onStatus('⏳ Removing background…');
     cutoutDbPut(fingerprint, blob);
   }
@@ -2325,12 +2344,12 @@ function comboCalc(keepUserMrp){
   if (!q('.cm-code').value) q('.cm-code').value = 'A';
   q('.cm-name').oninput = () => { q('.cm-name').dataset.touched = '1'; };
 }
-let comboRunId = 0, comboImage = '';
+let comboRunId = 0, comboImage = '', comboAiError = false;
 async function comboRebuild(){
   const my = ++comboRunId;
   const q = (s) => comboModal.querySelector(s);
   const parts = comboState.parts.filter(Boolean);
-  comboImage = '';
+  comboImage = ''; comboAiError = false;
   if (!parts.length){ q('.cm-preview').removeAttribute('src'); return; }
   q('.cm-pstatus').textContent = '⏳ Joining photos...';
   const layers = [];
@@ -2341,7 +2360,7 @@ async function comboRebuild(){
     let cut = adCutout(im);   // quick: plain white background
     if (!cut && comboModal.querySelector('.cm-ai').checked){
       try { cut = await smartCutout(full, p.catId + ':' + p.item.id, (msg) => { if (my === comboRunId) q('.cm-pstatus').textContent = msg; }); }
-      catch (e) { console.error('Smart background removal failed:', e); q('.cm-pstatus').textContent = '⚠️ Background could not be removed — check internet and try again.'; }
+      catch (e) { console.error('Smart background removal failed:', e); q('.cm-pstatus').textContent = '⚠️ Background could not be removed: ' + (e && e.message ? e.message : e) + ' — please send a screenshot of this message.'; comboAiError = true; }
       if (my !== comboRunId) return;
     }
     if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
@@ -2370,7 +2389,7 @@ async function comboRebuild(){
   }
   comboImage = c.toDataURL('image/jpeg', 0.9);
   q('.cm-preview').src = comboImage;
-  q('.cm-pstatus').textContent = '';
+  if (!comboAiError) q('.cm-pstatus').textContent = '';
 }
 async function comboSave(){
   const q = (s) => comboModal.querySelector(s);
