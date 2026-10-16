@@ -2220,6 +2220,8 @@ function openComboMaker(){
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
           <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PREVIEW</div>
+          <div style="font-size:12px; font-weight:700; color:#a9a9a9; margin-bottom:6px;">Background</div>
+          <div class="cm-bgs" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;"></div>
           <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:800; font-size:14px; margin:0 0 8px; line-height:1.4;"></div>
           <img class="cm-preview" style="width:100%; max-width:360px; display:block; margin:0 auto; border-radius:8px; background:#fff; min-height:120px;">
           <div class="cm-aiinfo" style="text-align:center; color:#8a8a8a; font-size:12px; margin-top:6px;"></div>
@@ -2321,6 +2323,7 @@ function openComboMaker(){
   q('.cm-status').textContent = '';
   q('.cm-rod').value = '';
   comboModal.style.display = 'block'; document.body.style.overflow = 'hidden';
+  comboRenderBgChips();
   comboRenderParts();
 }
 function comboFillDest(sel){
@@ -2495,6 +2498,79 @@ function cutReflection(cv){
   return t;
 }
 window.__comboTest = { cutReflection: (c) => cutReflection(c), fillEnclosedHoles: (a, b) => fillEnclosedHoles(a, b) };
+// Background scenes for the combo photo (drawn, so they work offline and never cost anything)
+const COMBO_BGS = [['white', 'White'], ['gold', '✨ Luxury Gold'], ['dark', '🖤 Royal Dark'], ['studio', '📷 Studio Grey'], ['velvet', '❤️ Red Velvet'], ['blue', '💙 Royal Blue']];
+function comboPaintScene(ctx, W, H, floorY, name){
+  const rnd = (() => { let x = 12345; return () => (x = x * 16807 % 2147483647) / 2147483647; })();
+  const bokeh = (count, col, maxA, yMax) => {
+    for (let i = 0; i < count; i++){
+      const x = rnd() * W, y = rnd() * yMax, r = 14 + rnd() * 60, a = 0.05 + rnd() * maxA;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, 'rgba(' + col + ',' + a + ')'); g.addColorStop(0.6, 'rgba(' + col + ',' + a * 0.5 + ')'); g.addColorStop(1, 'rgba(' + col + ',0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  };
+  const lin = (y0, y1, stops) => { const g = ctx.createLinearGradient(0, y0, 0, y1); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+  const rad = (cx, cy, r0, r1, stops) => { const g = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+  if (name === 'white'){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); return; }
+  if (name === 'gold'){
+    ctx.fillStyle = rad(W * 0.5, H * 0.38, 40, H * 0.8, [[0, '#7a5518'], [0.45, '#2e1e08'], [1, '#0b0703']]); ctx.fillRect(0, 0, W, H);
+    // warm light pillars like a showroom
+    [[0.12, 0.10], [0.88, 0.10]].forEach(([fx, wv]) => { ctx.fillStyle = lin(0, floorY, [[0, 'rgba(255,200,110,0.0)'], [0.4, 'rgba(255,200,110,0.22)'], [1, 'rgba(255,200,110,0.05)']]); ctx.fillRect(W * fx - W * wv / 2, 0, W * wv, floorY); });
+    bokeh(46, '255,205,120', 0.32, floorY);
+    ctx.fillStyle = lin(floorY - 30, H, [[0, '#d9cbb3'], [0.25, '#efe6d6'], [1, '#a8957a']]); ctx.fillRect(0, floorY - 30, W, H - floorY + 30);
+    ctx.strokeStyle = 'rgba(120,100,80,0.18)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 9; i++){ ctx.beginPath(); const x0 = rnd() * W; ctx.moveTo(x0, floorY - 20); ctx.bezierCurveTo(x0 + 120 * (rnd() - 0.5), floorY + 60, x0 + 200 * (rnd() - 0.5), floorY + 140, x0 + 260 * (rnd() - 0.5), H); ctx.stroke(); }
+    ctx.fillStyle = lin(floorY - 40, floorY + 10, [[0, 'rgba(255,220,160,0)'], [1, 'rgba(255,220,160,0.35)']]); ctx.fillRect(0, floorY - 40, W, 50);
+    return;
+  }
+  if (name === 'dark'){
+    ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = rad(W / 2, H * 0.35, 30, H * 0.6, [[0, 'rgba(255,240,210,0.22)'], [1, 'rgba(255,240,210,0)']]); ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = lin(0, floorY, [[0, 'rgba(255,236,190,0.16)'], [1, 'rgba(255,236,190,0.02)']]);
+    ctx.beginPath(); ctx.moveTo(W / 2 - 90, 0); ctx.lineTo(W / 2 + 90, 0); ctx.lineTo(W / 2 + 380, floorY); ctx.lineTo(W / 2 - 380, floorY); ctx.closePath(); ctx.fill();
+    bokeh(18, '255,215,150', 0.12, floorY * 0.9);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#1d1d1f'], [1, '#050505']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.save(); ctx.translate(W / 2, floorY); ctx.scale(1, 0.18); ctx.fillStyle = rad(0, 0, 10, 420, [[0, 'rgba(255,230,180,0.35)'], [1, 'rgba(255,230,180,0)']]); ctx.beginPath(); ctx.arc(0, 0, 420, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    return;
+  }
+  if (name === 'studio'){
+    ctx.fillStyle = rad(W / 2, H * 0.35, 50, H * 0.9, [[0, '#ffffff'], [1, '#cfd3d8']]); ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = lin(floorY - 60, H, [[0, 'rgba(210,214,220,0)'], [0.3, '#dfe2e6'], [1, '#bfc4ca']]); ctx.fillRect(0, floorY - 60, W, H - floorY + 60);
+    return;
+  }
+  if (name === 'velvet'){
+    ctx.fillStyle = rad(W / 2, H * 0.36, 40, H * 0.85, [[0, '#8e1b24'], [0.5, '#4a0a10'], [1, '#170204']]); ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 14; i++){ const x = (i + 0.5) * W / 14; ctx.fillStyle = lin(0, floorY, [[0, 'rgba(0,0,0,0.0)'], [1, 'rgba(0,0,0,0.18)']]); ctx.fillRect(x - 10, 0, 20, floorY); }   // curtain folds
+    bokeh(22, '255,200,150', 0.14, floorY);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#5a3418'], [0.4, '#3e2310'], [1, '#1d0f06']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 2;
+    for (let y = floorY + 10; y < H; y += 26){ ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y + 6); ctx.stroke(); }
+    return;
+  }
+  if (name === 'blue'){
+    ctx.fillStyle = rad(W / 2, H * 0.36, 40, H * 0.85, [[0, '#1f4fa8'], [0.5, '#0c2457'], [1, '#040a1c']]); ctx.fillRect(0, 0, W, H);
+    bokeh(40, '170,210,255', 0.22, floorY);
+    ctx.fillStyle = lin(floorY - 20, H, [[0, '#1b2d55'], [1, '#050b1a']]); ctx.fillRect(0, floorY - 20, W, H - floorY + 20);
+    ctx.save(); ctx.translate(W / 2, floorY); ctx.scale(1, 0.18); ctx.fillStyle = rad(0, 0, 10, 420, [[0, 'rgba(180,215,255,0.35)'], [1, 'rgba(180,215,255,0)']]); ctx.beginPath(); ctx.arc(0, 0, 420, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    return;
+  }
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+}
+function comboRenderBgChips(){
+  const box = comboModal.querySelector('.cm-bgs'); if (!box) return;
+  const cur = comboLs('shopapp-combo-bg', 'white');
+  box.innerHTML = '';
+  COMBO_BGS.forEach(([id, label]) => {
+    const b = document.createElement('button'); b.type = 'button';
+    const on = id === cur;
+    b.style.cssText = 'padding:8px 12px; border-radius:16px; font-weight:800; font-size:13px; border:2px solid ' + (on ? '#f0c341' : '#444') + '; background:' + (on ? '#f0c341' : '#141414') + '; color:' + (on ? '#000' : '#ddd') + ';';
+    b.textContent = label;
+    b.onclick = () => { comboLsSet('shopapp-combo-bg', id); comboRenderBgChips(); comboDraw(); };
+    box.appendChild(b);
+  });
+}
+
 function comboDraw(){
   const q = (s) => comboModal.querySelector(s);
   const layersRaw = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
@@ -2523,19 +2599,48 @@ function comboDraw(){
   const totalNoLift = totalIn - (layers.length > 1 ? layers[1].h * lift : 0);
   let k = (H - 2 * M) / Math.max(1, totalNoLift);
   layers.forEach(l => { const w = l.cut.width * (l.h * k) / l.cut.height; if (w > W - 2 * M) k = Math.min(k, (W - 2 * M) * l.cut.height / (l.cut.width * l.h)); });
+  const bgName = comboLs('shopapp-combo-bg', 'white');
+  const onScene = bgName !== 'white';
+  if (onScene) k *= 0.86;                       // leave room for the floor
   const c = document.createElement('canvas'); c.width = W; c.height = H;
-  const ctx = c.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
-  let bottom = (H + totalIn * k) / 2;
+  const ctx = c.getContext('2d');
+  // 1) the trophy stack on a transparent layer
+  const stack = document.createElement('canvas'); stack.width = W; stack.height = H;
+  const sx = stack.getContext('2d');
+  const floorY = onScene ? Math.round(H * 0.84) : (H + totalIn * k) / 2;
+  let bottom = floorY;
   const last = layers[layers.length - 1];
   const baseW = last.cut.width * (last.h * k) / last.cut.height;
-  ctx.fillStyle = 'rgba(0,0,0,0.12)'; ctx.beginPath(); ctx.ellipse(W / 2, bottom - 4, baseW * 0.5, 16, 0, 0, Math.PI * 2); ctx.fill();
   for (let i = layers.length - 1; i >= 0; i--){
     const l = layers[i]; const h = l.h * k; const w = l.cut.width * h / l.cut.height;
-    ctx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
+    sx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
     const s2 = (i === 1) ? sink - lift : sink;   // joint between part 1 (top) and part 2
     bottom = bottom - h * (1 - s2);
   }
-  comboImage = c.toDataURL('image/jpeg', 0.9);
+  // 2) background scene, 3) reflection + contact shadow, 4) trophy
+  comboPaintScene(ctx, W, H, floorY, bgName);
+  const glossy = { gold: 0.22, dark: 0.26, studio: 0.12, velvet: 0.18, blue: 0.24 }[bgName] || 0;
+  if (glossy){
+    const r = document.createElement('canvas'); r.width = W; r.height = H; const rx = r.getContext('2d');
+    rx.translate(0, floorY * 2); rx.scale(1, -1); rx.drawImage(stack, 0, 0); rx.setTransform(1, 0, 0, 1, 0, 0);
+    rx.globalCompositeOperation = 'destination-in';
+    const fade = rx.createLinearGradient(0, floorY, 0, floorY + H * 0.16);
+    fade.addColorStop(0, 'rgba(0,0,0,' + glossy + ')'); fade.addColorStop(1, 'rgba(0,0,0,0)');
+    rx.fillStyle = fade; rx.fillRect(0, floorY, W, H - floorY);
+    ctx.drawImage(r, 0, 0);
+  }
+  ctx.save();
+  ctx.filter = 'blur(10px)';
+  ctx.fillStyle = onScene ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.14)';
+  ctx.beginPath(); ctx.ellipse(W / 2, floorY - 2, baseW * 0.52, onScene ? 18 : 14, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  ctx.drawImage(stack, 0, 0);
+  if (onScene){   // soft light from above + gentle vignette, so it feels like one photo
+    const vg = ctx.createRadialGradient(W / 2, H * 0.42, H * 0.25, W / 2, H * 0.5, H * 0.8);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,' + (bgName === 'studio' ? 0.12 : 0.35) + ')');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  }
+  comboImage = c.toDataURL('image/jpeg', 0.92);
   q('.cm-preview').src = comboImage;
 }
 async function comboSave(){
