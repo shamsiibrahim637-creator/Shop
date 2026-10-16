@@ -2058,6 +2058,50 @@ function comboDefaultSource(){
 function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^0-9.]/g, '')) || 0; }
 function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
 
+// ---- AI background removal (runs on the phone; the AI is downloaded once) ----
+const SMART_BG_LIB = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/+esm';
+const smartCutCache = new Map();
+function cutoutDb(){
+  return new Promise((res, rej) => { const r = indexedDB.open('shopapp-cutouts', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function cutoutDbGet(key){ try { const db = await cutoutDb(); return await new Promise(res => { const g = db.transaction('kv').objectStore('kv').get(key); g.onsuccess = () => res(g.result || null); g.onerror = () => res(null); }); } catch (e) { return null; } }
+async function cutoutDbPut(key, blob){ try { const db = await cutoutDb(); db.transaction('kv', 'readwrite').objectStore('kv').put(blob, key); } catch (e) {} }
+function trimTransparent(img){
+  const c = document.createElement('canvas'); c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data;
+  let minX = c.width, minY = c.height, maxX = -1, maxY = -1;
+  for (let y = 0; y < c.height; y++) for (let i = 0; i < c.width; i++) if (d[(y * c.width + i) * 4 + 3] > 24){ if (i < minX) minX = i; if (i > maxX) maxX = i; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  const t = document.createElement('canvas'); t.width = maxX - minX + 1; t.height = maxY - minY + 1;
+  t.getContext('2d').drawImage(c, minX, minY, t.width, t.height, 0, 0, t.width, t.height);
+  return t;
+}
+async function smartCutout(dataUrl, key, onStatus){
+  const fingerprint = key + ':' + (dataUrl ? dataUrl.length : 0);
+  if (smartCutCache.has(fingerprint)) return smartCutCache.get(fingerprint);
+  let blob = await cutoutDbGet(fingerprint);
+  if (!blob){
+    onStatus('⏳ Loading the background-removal AI… (first time takes a minute)');
+    if (!window.__smartBgLib) window.__smartBgLib = import(SMART_BG_LIB);
+    let lib;
+    try { lib = await window.__smartBgLib; } catch (e) { window.__smartBgLib = null; throw e; }
+    const removeBackground = lib.removeBackground || (lib.default && lib.default.removeBackground) || lib.default;
+    const src = await (await fetch(dataUrl)).blob();
+    blob = await removeBackground(src, {
+      output: { format: 'image/png' },
+      progress: (k, cur, total) => { if (total) onStatus('⏳ Downloading AI… ' + Math.round(cur / total * 100) + '%'); }
+    });
+    onStatus('⏳ Removing background…');
+    cutoutDbPut(fingerprint, blob);
+  }
+  const url = URL.createObjectURL(blob);
+  const im = await adLoadImage(url);
+  const cut = im ? trimTransparent(im) : null;
+  if (cut) smartCutCache.set(fingerprint, cut);
+  return cut;
+}
+
 function openComboMaker(){
   if (!comboModal){
     comboModal = document.createElement('div');
@@ -2073,6 +2117,7 @@ function openComboMaker(){
         <label style="font-size:12px; font-weight:700; color:#a9a9a9;">Take parts from catalogue</label>
         <select class="cm-src" style="${inp} margin:4px 0 12px;"></select>
         <div class="cm-parts"></div>
+        <label style="display:flex; align-items:flex-start; gap:8px; margin:0 0 10px; font-size:13px; font-weight:700; line-height:1.4;"><input type="checkbox" class="cm-ai" checked style="width:18px; height:18px; flex-shrink:0; margin-top:1px;"> <span>✨ Smart background removal (AI) — cuts the trophy and base out of photos with a room / marble background so the trophy stands on the base.<br><span style="color:#8a8a8a; font-weight:400;">First time it downloads the AI (about 40 MB, use Wi-Fi). After that each photo is remembered on this phone.</span></span></label>
         <button type="button" class="cm-addpart" style="width:100%; padding:10px; border-radius:8px; border:1.5px dashed #b8912f; background:none; color:#f0c341; font-weight:800; font-size:14px; margin-bottom:12px;">+ Add another part</button>
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
@@ -2127,6 +2172,8 @@ function openComboMaker(){
     [['.cm-less', 'shopapp-combo-less'], ['.cm-margin', 'shopapp-combo-margin'], ['.cm-cust', 'shopapp-combo-cust']].forEach(([sel, key]) => {
       q(sel).oninput = () => { comboLsSet(key, q(sel).value); comboCalc(true); };
     });
+    q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
+    q('.cm-ai').onchange = () => { comboLsSet('shopapp-combo-ai', q('.cm-ai').checked ? '1' : '0'); comboRebuild(); };
     q('.cm-round').onchange = () => { comboLsSet('shopapp-combo-round', q('.cm-round').checked ? '1' : '0'); comboCalc(true); };
     q('.cm-dest').onchange = async () => {
       if (q('.cm-dest').value === '__new'){
@@ -2276,7 +2323,12 @@ async function comboRebuild(){
     const full = await fetchFullPhoto(p.catId, p.item);
     const im = await adLoadImage(full);
     if (!im) continue;
-    let cut = adCutout(im);
+    let cut = adCutout(im);   // quick: plain white background
+    if (!cut && comboModal.querySelector('.cm-ai').checked){
+      try { cut = await smartCutout(full, p.catId + ':' + p.item.id, (msg) => { if (my === comboRunId) q('.cm-pstatus').textContent = msg; }); }
+      catch (e) { console.error('Smart background removal failed:', e); q('.cm-pstatus').textContent = '⚠️ Background could not be removed — check internet and try again.'; }
+      if (my !== comboRunId) return;
+    }
     if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
     layers.push({ cut, inch: comboInch(p.v) || 0 });
   }
@@ -2285,8 +2337,8 @@ async function comboRebuild(){
   const known = layers.filter(l => l.inch > 0);
   const avgPxPerInch = known.length ? known.reduce((a, l) => a + l.cut.height / l.inch, 0) / known.length : 0;
   layers.forEach(l => { l.h = l.inch > 0 ? l.inch : (avgPxPerInch ? l.cut.height / avgPxPerInch : 4); });
-  const W = 1000, H = 1300, M = 60, overlap = 0.03;
-  const totalIn = layers.reduce((a, l, i) => a + l.h * (i < layers.length - 1 ? 1 - overlap : 1), 0);
+  const W = 1000, H = 1300, M = 60, sink = 0.08; // upper part sits slightly into the top face of the part below
+  const totalIn = layers.reduce((a, l, i) => a + l.h * (i > 0 ? 1 - sink : 1), 0);
   let k = (H - 2 * M) / totalIn;
   layers.forEach(l => { const w = l.cut.width * (l.h * k) / l.cut.height; if (w > W - 2 * M) k = Math.min(k, (W - 2 * M) * l.cut.height / (l.cut.width * l.h)); });
   const c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -2299,7 +2351,7 @@ async function comboRebuild(){
   for (let i = layers.length - 1; i >= 0; i--){
     const l = layers[i]; const h = l.h * k; const w = l.cut.width * h / l.cut.height;
     ctx.drawImage(l.cut, (W - w) / 2, bottom - h, w, h);
-    bottom = bottom - h * (1 - overlap);
+    bottom = bottom - h * (1 - sink);
   }
   comboImage = c.toDataURL('image/jpeg', 0.9);
   q('.cm-preview').src = comboImage;
