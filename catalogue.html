@@ -2127,6 +2127,11 @@ function openComboMaker(){
             <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Your margin %</label><input type="number" class="cm-margin" style="${inp}" inputmode="decimal"></div>
             <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Customer discount %</label><input type="number" class="cm-cust" style="${inp}" inputmode="decimal"></div>
           </div>
+          <div style="display:flex; gap:8px; margin-top:8px; align-items:flex-end;">
+            <div style="flex:1;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">🔩 Rod (₹) — optional</label><input type="number" class="cm-rod" placeholder="0" style="${inp}" inputmode="decimal"></div>
+            <div style="flex:1.4;"><label style="font-size:11px; color:#a9a9a9; font-weight:700;">Rod price is</label>
+              <select class="cm-rodtype" style="${inp}"><option value="cost">My cost (no discount)</option><option value="mrp">Loose MRP (less % applies)</option></select></div>
+          </div>
           <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:13px; font-weight:700;"><input type="checkbox" class="cm-round" style="width:18px; height:18px;"> Round MRP up to the next ₹10</label>
           <div class="cm-calc" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
         </div>
@@ -2174,6 +2179,9 @@ function openComboMaker(){
     });
     q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
     q('.cm-ai').onchange = () => { comboLsSet('shopapp-combo-ai', q('.cm-ai').checked ? '1' : '0'); comboRebuild(); };
+    q('.cm-rod').oninput = () => comboCalc(true);
+    q('.cm-rodtype').onchange = () => { comboLsSet('shopapp-combo-rodtype', q('.cm-rodtype').value); comboCalc(true); };
+    q('.cm-rodtype').value = comboLs('shopapp-combo-rodtype', 'cost');
     q('.cm-round').onchange = () => { comboLsSet('shopapp-combo-round', q('.cm-round').checked ? '1' : '0'); comboCalc(true); };
     q('.cm-dest').onchange = async () => {
       if (q('.cm-dest').value === '__new'){
@@ -2201,6 +2209,7 @@ function openComboMaker(){
   const combo = catalogues.find(c => /combo/i.test(c.name));
   comboFillDest(catalogues.some(c => c.id === destDefault) ? destDefault : (combo ? combo.id : currentCatalogueId));
   q('.cm-status').textContent = '';
+  q('.cm-rod').value = '';
   comboModal.style.display = 'block'; document.body.style.overflow = 'hidden';
   comboRenderParts();
 }
@@ -2288,7 +2297,10 @@ function comboCalc(keepUserMrp){
   const parts = comboState.parts.filter(Boolean);
   const less = parseFloat(q('.cm-less').value) || 0, margin = parseFloat(q('.cm-margin').value) || 0, cust = parseFloat(q('.cm-cust').value) || 0;
   const loose = parts.reduce((a, p) => a + comboPrice(p.v), 0);
-  const cost = loose * (1 - less / 100);
+  const rod = Math.max(0, parseFloat(q('.cm-rod').value) || 0);
+  const rodIsMrp = q('.cm-rodtype').value === 'mrp';
+  const rodCost = rodIsMrp ? rod * (1 - less / 100) : rod;
+  const cost = loose * (1 - less / 100) + rodCost;
   const sell = cost * (1 + margin / 100);
   let mrp = cust < 100 ? sell / (1 - cust / 100) : 0;
   if (q('.cm-round').checked) mrp = Math.ceil(mrp / 10) * 10; else mrp = Math.round(mrp);
@@ -2296,7 +2308,10 @@ function comboCalc(keepUserMrp){
   q('.cm-calc').innerHTML = parts.length ? (
     parts.map(p => '<div style="display:flex; justify-content:space-between;"><span>' + escapeHtml(p.item.name) + ' (' + escapeHtml(p.v.code || '-') + ')</span><span>' + r(comboPrice(p.v)) + '</span></div>').join('') +
     '<div style="display:flex; justify-content:space-between; border-top:1px solid #333; margin-top:4px; padding-top:4px;"><span>Loose MRP total</span><b>' + r(loose) + '</b></div>' +
-    '<div style="display:flex; justify-content:space-between;"><span>Your cost (−' + less + '%)</span><span>' + r(cost) + '</span></div>' +
+    (rod > 0 ? '<div style="display:flex; justify-content:space-between;"><span>Loose parts after −' + less + '%</span><span>' + r(loose * (1 - less / 100)) + '</span></div>' +
+      '<div style="display:flex; justify-content:space-between;"><span>+ 🔩 Rod' + (rodIsMrp ? ' (₹' + rod + ' −' + less + '%)' : '') + '</span><span>' + r(rodCost) + '</span></div>' +
+      '<div style="display:flex; justify-content:space-between;"><span>Your total cost</span><span>' + r(cost) + '</span></div>'
+    : '<div style="display:flex; justify-content:space-between;"><span>Your cost (−' + less + '%)</span><span>' + r(cost) + '</span></div>') +
     '<div style="display:flex; justify-content:space-between;"><span>+ Margin ' + margin + '% = you get</span><b style="color:#7cd992;">' + r(sell) + '</b></div>' +
     '<div style="display:flex; justify-content:space-between; font-size:17px; color:#f0c341; margin-top:4px;"><b>New MRP</b><b>' + r(mrp) + '</b></div>' +
     '<div style="color:#a9a9a9; font-size:12px;">After ' + cust + '% off the customer pays ' + r(mrp * (1 - cust / 100)) + '</div>'
@@ -2368,6 +2383,8 @@ async function comboSave(){
   const btn = q('.cm-save'); btn.disabled = true; q('.cm-status').style.color = '#f0c341'; q('.cm-status').textContent = '⏳ Saving...';
   try {
     const parts = comboState.parts.map(p => ({ name: p.item.name, size: p.v.code || '', inch: p.v.inch || '', mrp: p.v.price || '' }));
+    const rodVal = parseFloat(q('.cm-rod').value) || 0;
+    if (rodVal > 0) parts.push({ name: 'ROD', rodPrice: rodVal, rodType: q('.cm-rodtype').value });
     if (destId === currentCatalogueId){
       if (itemsLoadFailed) throw new Error('This catalogue did not load properly — tap Refresh first.');
       const existing = items.find(i => i.name.trim().toUpperCase() === name.toUpperCase());
