@@ -2059,6 +2059,16 @@ function comboPrice(v){ return parseFloat(String(v && v.price || '').replace(/[^
 function comboInch(v){ return parseFloat(String(v && v.inch || '').replace(/[^0-9.]/g, '')) || 0; }
 function comboInchKey(p){ return 'shopapp-combo-inch:' + p.catId + ':' + p.item.id + ':' + (p.v.code || ''); }
 // Real height of a part: what you typed in the Combo Maker, else the size's inch in the catalogue
+function comboCropKey(p){ return 'shopapp-combo-crop:' + p.catId + ':' + p.item.id; }
+function comboSyncCropSliders(){
+  if (!comboModal) return;
+  const q = (s) => comboModal.querySelector(s);
+  const parts = comboState.parts.filter(Boolean);
+  const top = parts[0], bot = parts.length > 1 ? parts[parts.length - 1] : null;
+  q('.cm-ctop').value = top ? (parseFloat(comboLs(comboCropKey(top), '0')) || 0) : 0;
+  q('.cm-cbot').value = bot ? (parseFloat(comboLs(comboCropKey(bot), '0')) || 0) : 0;
+  q('.cm-ctop-v').textContent = q('.cm-ctop').value + '%'; q('.cm-cbot-v').textContent = q('.cm-cbot').value + '%';
+}
 function comboPartInch(p){ const o = parseFloat(comboLs(comboInchKey(p), '')); return o > 0 ? o : comboInch(p.v); }
 
 // ---- AI background removal (runs on the phone; the AI is downloaded once) ----
@@ -2218,6 +2228,11 @@ function openComboMaker(){
             <input type="range" class="cm-lift" min="-60" max="60" step="1" value="0" style="width:100%;">
             <label style="display:block; margin-top:6px;">🔍 Trophy size <span class="cm-grow-v" style="color:#f0c341;"></span></label>
             <input type="range" class="cm-grow" min="40" max="250" step="1" value="100" style="width:100%;">
+            <label style="display:block; margin-top:10px;">✂️ Cut reflection under the TROPHY <span class="cm-ctop-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-ctop" min="0" max="45" step="1" value="0" style="width:100%;">
+            <label style="display:block; margin-top:6px;">✂️ Cut reflection under the BASE <span class="cm-cbot-v" style="color:#f0c341;"></span></label>
+            <input type="range" class="cm-cbot" min="0" max="45" step="1" value="0" style="width:100%;">
+            <div style="color:#8a8a8a; font-weight:400; font-size:12px; margin-top:2px;">Slide right until the shiny copy under the trophy / base disappears. Remembered for each part.</div>
             <button type="button" class="cm-reset-adj" style="margin-top:6px; background:none; border:1.5px solid #555; color:#c9c9c9; border-radius:6px; padding:6px 12px; font-weight:800; font-size:12px;">Reset position</button>
           </div>
         </div>
@@ -2261,6 +2276,14 @@ function openComboMaker(){
     q('.cm-lift').oninput = () => { adjLabels(); comboDraw(); };
     q('.cm-grow').oninput = () => { adjLabels(); comboDraw(); };
     q('.cm-reset-adj').onclick = () => { q('.cm-lift').value = 0; q('.cm-grow').value = 100; adjLabels(); comboDraw(); };
+    const cropSlider = (sel, which) => {
+      q(sel).oninput = () => {
+        const parts = comboState.parts.filter(Boolean); const p = which === 'top' ? parts[0] : parts[parts.length - 1];
+        if (p) comboLsSet(comboCropKey(p), q(sel).value);
+        q(sel + '-v').textContent = q(sel).value + '%'; comboDraw();
+      };
+    };
+    cropSlider('.cm-ctop', 'top'); cropSlider('.cm-cbot', 'bottom');
     adjLabels();
     q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
     q('.cm-fill').checked = comboLs('shopapp-combo-fill', '1') === '1';
@@ -2445,6 +2468,7 @@ async function comboRebuild(){
   }
   if (my !== comboRunId) return;
   comboState.layers = layers;
+  comboSyncCropSliders();
   if (!comboAiError) q('.cm-pstatus').textContent = '';
   q('.cm-aiinfo').textContent = layers.map(l => l.info).join(' · ') + (q('.cm-ai').checked ? '' : ' · (AI is switched off)');
   comboDraw();
@@ -2473,8 +2497,18 @@ function cutReflection(cv){
 window.__comboTest = { cutReflection: (c) => cutReflection(c), fillEnclosedHoles: (a, b) => fillEnclosedHoles(a, b) };
 function comboDraw(){
   const q = (s) => comboModal.querySelector(s);
-  const layers = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
-  if (!layers.length) return;
+  const layersRaw = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
+  if (!layersRaw.length) return;
+  // manual reflection cut (from the ✂️ sliders): crop that share off the bottom
+  const cTop = (parseFloat(q('.cm-ctop').value) || 0) / 100, cBot = (parseFloat(q('.cm-cbot').value) || 0) / 100;
+  const layers = layersRaw.map((l, i) => {
+    const pct = i === 0 ? cTop : (i === layersRaw.length - 1 ? cBot : 0);
+    if (!pct) return l;
+    const hh = Math.max(1, Math.round(l.cut.height * (1 - pct)));
+    const t = document.createElement('canvas'); t.width = l.cut.width; t.height = hh;
+    t.getContext('2d').drawImage(l.cut, 0, 0, l.cut.width, hh, 0, 0, l.cut.width, hh);
+    return Object.assign({}, l, { cut: t });
+  });
   const lift = (parseFloat(q('.cm-lift').value) || 0) / 100;   // top part up(+)/down(−), share of the part below
   const grow = (parseFloat(q('.cm-grow').value) || 100) / 100; // top part size
   // heights: by inches when known, else by the photo's own proportion
