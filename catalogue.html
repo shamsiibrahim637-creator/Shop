@@ -2157,8 +2157,9 @@ function openComboMaker(){
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
           <div style="font-weight:800; color:#f0c341; font-size:13px; letter-spacing:1px; margin-bottom:8px;">PREVIEW</div>
+          <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:800; font-size:14px; margin:0 0 8px; line-height:1.4;"></div>
           <img class="cm-preview" style="width:100%; max-width:360px; display:block; margin:0 auto; border-radius:8px; background:#fff; min-height:120px;">
-          <div class="cm-pstatus" style="text-align:center; color:#f0c341; font-weight:700; font-size:13px; margin-top:6px;"></div>
+          <div class="cm-aiinfo" style="text-align:center; color:#8a8a8a; font-size:12px; margin-top:6px;"></div>
         </div>
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
@@ -2363,8 +2364,9 @@ async function comboRebuild(){
       catch (e) { console.error('Smart background removal failed:', e); q('.cm-pstatus').textContent = '⚠️ Background could not be removed: ' + (e && e.message ? e.message : e) + ' — please send a screenshot of this message.'; comboAiError = true; }
       if (my !== comboRunId) return;
     }
+    let method = cut ? 'cut out' : 'NOT cut out';
     if (!cut){ cut = document.createElement('canvas'); cut.width = im.naturalWidth; cut.height = im.naturalHeight; cut.getContext('2d').drawImage(im, 0, 0); }
-    layers.push({ cut, inch: comboInch(p.v) || 0 });
+    layers.push({ cut, inch: comboInch(p.v) || 0, info: p.item.name + ': ' + method });
   }
   if (my !== comboRunId) return;
   // heights: by inches when known, else by the photo's own proportion
@@ -2390,6 +2392,7 @@ async function comboRebuild(){
   comboImage = c.toDataURL('image/jpeg', 0.9);
   q('.cm-preview').src = comboImage;
   if (!comboAiError) q('.cm-pstatus').textContent = '';
+  q('.cm-aiinfo').textContent = layers.map(l => l.info).join(' · ') + (q('.cm-ai').checked ? '' : ' · (AI is switched off)');
 }
 async function comboSave(){
   const q = (s) => comboModal.querySelector(s);
