@@ -2092,7 +2092,8 @@ function trimTransparent(img){
 }
 async function smartCutout(dataUrl, key, onStatus){
   const fingerprint = key + ':' + (dataUrl ? dataUrl.length : 0);
-  if (smartCutCache.has(fingerprint)) return smartCutCache.get(fingerprint);
+  const keepMid0 = !comboModal || !comboModal.querySelector('.cm-fill') || comboModal.querySelector('.cm-fill').checked;
+  if (smartCutCache.has(fingerprint + (keepMid0 ? ':fill' : ''))) return smartCutCache.get(fingerprint + (keepMid0 ? ':fill' : ''));
   let blob = await cutoutDbGet(fingerprint);
   if (!blob){
     onStatus('⏳ Loading the background-removal AI… (first time takes a minute)');
@@ -2116,9 +2117,54 @@ async function smartCutout(dataUrl, key, onStatus){
   }
   const url = URL.createObjectURL(blob);
   const im = await adLoadImage(url);
-  const cut = im ? trimTransparent(im) : null;
-  if (cut) smartCutCache.set(fingerprint, cut);
+  if (!im) return null;
+  let src2 = im;
+  const keepMiddle = !comboModal || !comboModal.querySelector('.cm-fill') || comboModal.querySelector('.cm-fill').checked;
+  if (keepMiddle){
+    const orig = await adLoadImage(dataUrl);
+    if (orig) src2 = fillEnclosedHoles(im, orig) || im;
+  }
+  const cut = trimTransparent(src2);
+  if (cut) smartCutCache.set(fingerprint + (keepMiddle ? ':fill' : ''), cut);
   return cut;
+}
+// The AI sometimes removes a plain part in the MIDDLE of the trophy (e.g. the
+// gold disc inside a ring). Any see-through area that is fully surrounded by
+// the trophy and is not tiny is put back from the original photo.
+function fillEnclosedHoles(cutImg, origImg){
+  const w = cutImg.naturalWidth || cutImg.width, h = cutImg.naturalHeight || cutImg.height;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(cutImg, 0, 0);
+  const o = document.createElement('canvas'); o.width = w; o.height = h;
+  o.getContext('2d').drawImage(origImg, 0, 0, w, h);
+  let cd, od;
+  try { cd = x.getImageData(0, 0, w, h); od = o.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return null; }
+  const d = cd.data, N = w * h;
+  const state = new Uint8Array(N); // 0 = unvisited, 1 = solid, 2 = outside, 3 = hole
+  let solid = 0;
+  for (let i = 0; i < N; i++) if (d[i * 4 + 3] >= 128){ state[i] = 1; solid++; }
+  const stack = new Int32Array(N);
+  let sp = 0;
+  const seed = (i) => { if (state[i] === 0){ state[i] = 2; stack[sp++] = i; } };
+  for (let i = 0; i < w; i++){ seed(i); seed((h - 1) * w + i); }
+  for (let j = 0; j < h; j++){ seed(j * w); seed(j * w + w - 1); }
+  while (sp){ const i = stack[--sp], px = i % w; if (px > 0) seed(i - 1); if (px < w - 1) seed(i + 1); if (i >= w) seed(i - w); if (i < N - w) seed(i + w); }
+  const minSize = Math.max(60, solid * 0.004);
+  let changed = false;
+  for (let i0 = 0; i0 < N; i0++){
+    if (state[i0] !== 0) continue;
+    const comp = []; state[i0] = 3; stack[0] = i0; sp = 1;
+    while (sp){ const i = stack[--sp]; comp.push(i); const px = i % w;
+      const nb = [px > 0 ? i - 1 : -1, px < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < N - w ? i + w : -1];
+      for (const n of nb) if (n >= 0 && state[n] === 0){ state[n] = 3; stack[sp++] = n; } }
+    if (comp.length >= minSize){
+      for (const i of comp){ d[i * 4] = od[i * 4]; d[i * 4 + 1] = od[i * 4 + 1]; d[i * 4 + 2] = od[i * 4 + 2]; d[i * 4 + 3] = 255; }
+      changed = true;
+    }
+  }
+  if (!changed) return null;
+  x.putImageData(cd, 0, 0);
+  return c;
 }
 
 function openComboMaker(){
@@ -2137,6 +2183,7 @@ function openComboMaker(){
         <select class="cm-src" style="${inp} margin:4px 0 12px;"></select>
         <div class="cm-parts"></div>
         <label style="display:flex; align-items:flex-start; gap:8px; margin:0 0 10px; font-size:13px; font-weight:700; line-height:1.4;"><input type="checkbox" class="cm-ai" checked style="width:18px; height:18px; flex-shrink:0; margin-top:1px;"> <span>✨ Smart background removal (AI) — cuts the trophy and base out of photos with a room / marble background so the trophy stands on the base.<br><span style="color:#8a8a8a; font-weight:400;">First time it downloads the AI (about 40 MB, use Wi-Fi). After that each photo is remembered on this phone.</span></span></label>
+        <label style="display:flex; align-items:center; gap:8px; margin:-4px 0 10px 26px; font-size:13px; font-weight:700;"><input type="checkbox" class="cm-fill" checked style="width:18px; height:18px;"> Keep the middle of the trophy (fill gaps the AI removed)</label>
         <button type="button" class="cm-addpart" style="width:100%; padding:10px; border-radius:8px; border:1.5px dashed #b8912f; background:none; color:#f0c341; font-weight:800; font-size:14px; margin-bottom:12px;">+ Add another part</button>
 
         <div style="background:#141414; border:1.5px solid #2c2c2c; border-radius:10px; padding:12px; margin-bottom:12px;">
@@ -2210,6 +2257,8 @@ function openComboMaker(){
     q('.cm-reset-adj').onclick = () => { q('.cm-lift').value = 0; q('.cm-grow').value = 100; adjLabels(); comboDraw(); };
     adjLabels();
     q('.cm-ai').checked = comboLs('shopapp-combo-ai', '1') === '1';
+    q('.cm-fill').checked = comboLs('shopapp-combo-fill', '1') === '1';
+    q('.cm-fill').onchange = () => { comboLsSet('shopapp-combo-fill', q('.cm-fill').checked ? '1' : '0'); comboRebuild(); };
     q('.cm-ai').onchange = () => { comboLsSet('shopapp-combo-ai', q('.cm-ai').checked ? '1' : '0'); comboRebuild(); };
     q('.cm-rod').oninput = () => comboCalc(true);
     q('.cm-rodtype').onchange = () => { comboLsSet('shopapp-combo-rodtype', q('.cm-rodtype').value); comboCalc(true); };
@@ -2407,7 +2456,7 @@ function cutReflection(cv){
   t.getContext('2d').drawImage(cv, 0, 0, w, bottom + 1, 0, 0, w, bottom + 1);
   return t;
 }
-window.__comboTest = { cutReflection: (c) => cutReflection(c) };
+window.__comboTest = { cutReflection: (c) => cutReflection(c), fillEnclosedHoles: (a, b) => fillEnclosedHoles(a, b) };
 function comboDraw(){
   const q = (s) => comboModal.querySelector(s);
   const layers = (comboState.layers || []).map(l => Object.assign({}, l, { cut: l.noRefl || (l.noRefl = cutReflection(l.cut)) }));
