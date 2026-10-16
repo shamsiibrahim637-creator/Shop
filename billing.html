@@ -1391,7 +1391,7 @@ async function readCloudCatalogueProducts(onBatch){
         try { item = JSON.parse(r.value); } catch (e) { return; }
         if (item.outOfStock) return;
         const vars = item.variations && item.variations.length ? item.variations : [{}];
-        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, photo: item.thumb || item.dataUrl || '' }));
+        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: item.thumb || item.dataUrl || '' }));
         products.push(...out);
         if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
       })));
@@ -1569,27 +1569,41 @@ tabManualBtn.addEventListener('click', () => {
 function groupProductsByName(query){
   const q = query.trim().toLowerCase();
   const groups = {};
+  const words = q.split(/\s+/).filter(Boolean);
   catalogueProducts.forEach(p => {
     const nameMatch = p.name.toLowerCase().includes(q);
     const codeMatch = (p.code || '').toLowerCase().includes(q);
-    if (q && !nameMatch && !codeMatch) return;
-    if (!groups[p.name]) groups[p.name] = [];
-    groups[p.name].push(p);
+    // "loose 1078" also works: every word must match the name, size or catalogue
+    const hay = (p.name + ' ' + (p.code || '') + ' ' + (p.catalogueName || '')).toLowerCase();
+    const wordsMatch = words.length > 1 && words.every(w => hay.includes(w));
+    if (q && !nameMatch && !codeMatch && !wordsMatch) return;
+    const gk = (p.catalogueName || '') + '\u0001' + p.name;
+    if (!groups[gk]) groups[gk] = [];
+    groups[gk].push(p);
   });
   return groups;
 }
 
+function catalogueBadgeHtml(catName, color, small){
+  if (!catName) return '';
+  return '<span style="display:inline-block; background:' + (color || '#3a3a3a') + '; color:#fff; font-family:Arial,sans-serif; font-size:' + (small ? 10 : 11) + 'px; font-weight:900; letter-spacing:0.4px; padding:2px 7px; border-radius:4px; vertical-align:middle;">' + escapeHtml(String(catName).toUpperCase()) + '</span>';
+}
 function buildProductCard(name, variants){
   const photo = variants.find(v => v.photo)?.photo || '';
+  const catName = variants[0] && variants[0].catalogueName || '';
+  const tagColor = variants[0] && variants[0].tagColor || '';
   const card = document.createElement('div');
   card.className = 'product-result-card';
-  card.style.cssText = 'background:var(--navy); border:1.5px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; font-family:Arial,sans-serif;';
+  card.style.cssText = 'background:var(--navy); border:' + (tagColor ? '3px solid ' + tagColor : '1.5px solid var(--line)') + '; border-radius:8px; padding:12px; margin-bottom:12px; font-family:Arial,sans-serif;';
 
   const header = document.createElement('div');
   header.style.cssText = 'display:flex; gap:10px; align-items:center; margin-bottom:8px;';
   header.innerHTML = `
     ${photo ? `<img src="${photo}" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;border:1.5px solid var(--brass);">` : `<div style="width:56px;height:56px;border-radius:6px;flex-shrink:0;background:var(--navy-2);border:1.5px solid var(--line);"></div>`}
-    <p style="margin:0; font-weight:800; font-size:16px; color:var(--cream);">${escapeHtml(name)}</p>
+    <div style="min-width:0;">
+      <p style="margin:0; font-weight:800; font-size:16px; color:${tagColor || 'var(--cream)'};">${escapeHtml(name)}</p>
+      <div style="margin-top:4px;">${catalogueBadgeHtml(catName, tagColor)}</div>
+    </div>
   `;
   card.appendChild(header);
 
@@ -1611,7 +1625,7 @@ function buildProductCard(name, variants){
       const qty = Math.max(1, parseInt(qtyInput.value, 10) || 1);
       const rate = parseFloat(rateInput.value) || 0;
       const sizeLabel = [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' ');
-      currentItems.push({ name, size: sizeLabel, qty, rate, photo: v.photo || photo || '' });
+      currentItems.push({ name, size: sizeLabel, qty, rate, photo: v.photo || photo || '', catalogue: catName, tagColor });
       renderBillItems();
       billStatusMsg.textContent = '1 size added to the bill — keep searching to add more items.';
     });
@@ -1636,8 +1650,8 @@ function renderProductResults(){
       : '<p style="font-family:Arial,sans-serif; color:#8a8a8a; font-size:14px;">No matching products. Try Manual Entry instead.</p>';
     return;
   }
-  names.forEach(name => {
-    productResults.appendChild(buildProductCard(name, groups[name]));
+  names.forEach(key => {
+    productResults.appendChild(buildProductCard(groups[key][0].name, groups[key]));
   });
 }
 productSearch.addEventListener('input', renderProductResults);
@@ -1667,7 +1681,7 @@ function renderBillItems(){
     row.innerHTML = `
       ${item.photo ? `<img src="${item.photo}" style="width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0;border:1.5px solid var(--brass);">` : ''}
       <div class="info">
-        <p class="iname">${escapeHtml(item.name)}</p>
+        <p class="iname"${item.tagColor ? ` style="color:${item.tagColor};"` : ''}>${escapeHtml(item.name)} ${item.catalogue ? catalogueBadgeHtml(item.catalogue, item.tagColor, true) : ''}</p>
         ${item.size ? `<p class="isize">${escapeHtml(item.size)}</p>` : ''}
         <p style="font-family:Arial,sans-serif; font-size:14px; font-weight:700; color:var(--brass-light); margin:6px 0 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
           Rs.
@@ -2174,7 +2188,17 @@ function buildBillPDFDoc(bill){
     // next column starts, so a long product name or size label wraps
     // instead of running into the numbers beside it.
     const nameLines = doc.splitTextToSize(item.name, 60).slice(0, 2);
-    doc.text(nameLines, 42, y+9);
+    if (item.tagColor && item.catalogue){
+      const n = parseInt(String(item.tagColor).replace('#', ''), 16);
+      doc.setTextColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
+      doc.text(nameLines, 42, y+9);
+      doc.setFontSize(8);
+      doc.text('[' + String(item.catalogue).toUpperCase() + ']', 42, y + 9 + nameLines.length * 4.4);
+      doc.setFontSize(10);
+      doc.setTextColor(20,20,20);
+    } else {
+      doc.text(nameLines, 42, y+9);
+    }
     const sizeLines = doc.splitTextToSize(String(item.size || '-'), 26).slice(0, 2);
     doc.text(sizeLines, 108, y+11);
     doc.text(String(item.qty), 138, y+14);
@@ -2354,7 +2378,7 @@ function buildEstimateText(bill){
   lines.push('');
   (bill.items || []).forEach((it, idx) => {
     const amt = (parseFloat(it.qty) || 0) * (parseFloat(it.rate) || 0);
-    lines.push((idx + 1) + '. ' + it.name + (it.size ? ' (' + it.size + ')' : '') + ' — ' + it.qty + ' × ' + r(it.rate) + ' = ' + r(amt));
+    lines.push((idx + 1) + '. ' + it.name + (it.catalogue && it.tagColor ? ' [' + String(it.catalogue).toUpperCase() + ']' : '') + (it.size ? ' (' + it.size + ')' : '') + ' — ' + it.qty + ' × ' + r(it.rate) + ' = ' + r(amt));
   });
   lines.push('');
   lines.push('Subtotal: ' + r(bill.subtotal));

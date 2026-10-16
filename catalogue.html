@@ -941,6 +941,10 @@ window.__switchView = function(){};
       <button type="button" id="rename-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#c9c9c9; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">✎ Rename</button>
       <button type="button" id="delete-catalogue-btn" style="flex:1; background:var(--navy); border:1.5px solid var(--line); color:#e0705a; padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:14px; font-weight:800; cursor:pointer;">🗑 Delete</button>
     </div>
+    <div id="tag-row" style="margin-top:12px; font-family:Arial,sans-serif;">
+      <div style="font-size:13px; font-weight:700; color:#c9c9c9; margin-bottom:6px;">🏷 Colour tag for this catalogue <span style="font-weight:400; color:#8a8a8a;">(shows on every product, in PDFs and in Billing)</span></div>
+      <div id="tag-chips" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+    </div>
     <div id="catalogue-name-row" style="display:none; margin-top:12px; gap:8px;">
       <input type="text" id="catalogue-name-input" placeholder="Catalogue name" style="flex:1; padding:12px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:17px; margin-bottom:8px; width:100%;">
       <div style="display:flex; gap:8px;">
@@ -1135,7 +1139,37 @@ async function saveCatalogueList(){
   await storage.set(CATALOGUE_LIST_KEY, JSON.stringify(catalogues), true);
 }
 
+// ---- Colour tag per catalogue (e.g. LOOSE = red) so similar model numbers in
+// different catalogues are never mixed up ----
+const TAG_COLOURS = [['', 'None'], ['#e53935', 'Red'], ['#1e88e5', 'Blue'], ['#43a047', 'Green'], ['#fb8c00', 'Orange'], ['#8e24aa', 'Purple'], ['#d81b60', 'Pink']];
+function currentCatalogueTag(){
+  const c = catalogues.find(x => x.id === currentCatalogueId);
+  return c && c.tagColor ? { color: c.tagColor, text: String(c.name || '').toUpperCase() } : null;
+}
+function hexToRgb(h){ const n = parseInt(String(h).replace('#', ''), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function renderTagChips(){
+  const box = document.getElementById('tag-chips'); if (!box) return;
+  const c = catalogues.find(x => x.id === currentCatalogueId);
+  const cur = (c && c.tagColor) || '';
+  box.innerHTML = '';
+  TAG_COLOURS.forEach(([col, label]) => {
+    const b = document.createElement('button'); b.type = 'button';
+    const sel = col === cur;
+    b.style.cssText = 'padding:8px 12px; border-radius:16px; font-weight:800; font-size:13px; cursor:pointer; border:2px solid ' + (sel ? '#fff' : (col || '#555')) + '; background:' + (col || 'transparent') + '; color:' + (col ? '#fff' : '#c9c9c9') + ';' + (sel ? ' box-shadow:0 0 0 2px ' + (col || '#888') + ';' : '');
+    b.textContent = (sel ? '✓ ' : '') + label;
+    b.addEventListener('click', async () => {
+      const cat = catalogues.find(x => x.id === currentCatalogueId); if (!cat) return;
+      if (col) cat.tagColor = col; else delete cat.tagColor;
+      renderTagChips(); renderGrid();
+      try { await saveCatalogueList(); syncText.textContent = col ? ('Saved ✓ — ' + cat.name + ' is now tagged ' + label) : 'Saved ✓ — tag removed'; }
+      catch (e) { alert('Could not save the tag — check your internet and try again.'); }
+    });
+    box.appendChild(b);
+  });
+}
+
 function renderCatalogueSelect(){
+  renderTagChips();
   catalogueSelect.innerHTML = '';
   catalogues.forEach(cat => {
     const opt = document.createElement('option');
@@ -2912,15 +2946,18 @@ function renderGrid(){
     const card = document.createElement('div');
     card.className = 'item-card';
     card.setAttribute('data-item-id', item.id);
+    const ctag = currentCatalogueTag();
+    if (ctag){ card.style.border = '3px solid ' + ctag.color; card.style.boxShadow = '0 0 0 1px ' + ctag.color + ' inset'; }
     card.innerHTML = `
       ${isFiltering ? '' : `<div class="drag-handle" data-id="${item.id}">⠿ Hold &amp; drag to reorder</div>`}
       <div style="position:relative;">
         <img src="${itemPhoto(item)}" loading="lazy" decoding="async" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
+        ${ctag ? `<span style="position:absolute; top:6px; left:6px; background:${ctag.color}; color:#fff; font-family:Arial,sans-serif; font-weight:900; font-size:12px; letter-spacing:0.5px; padding:4px 9px; border-radius:5px; box-shadow:0 1px 4px rgba(0,0,0,0.5); max-width:70%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(ctag.text)}</span>` : ''}
         ${item.outOfStock ? `<div style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; pointer-events:none;"><span style="background:rgba(179,70,44,0.92); color:#fff; font-family:Arial,sans-serif; font-weight:800; font-size:13px; padding:5px 12px; border-radius:5px; transform:rotate(-12deg); letter-spacing:0.5px;">OUT OF STOCK</span></div>` : ''}
         <button type="button" class="download-photo-btn" data-id="${item.id}" title="Download this photo" style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.7); border:1.5px solid var(--brass-light); color:var(--brass-light); border-radius:5px; padding:5px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">⬇</button>
       </div>
       <div class="item-body">
-        <p class="name">${escapeHtml(item.name)}</p>
+        <p class="name"${ctag ? ` style="color:${ctag.color};"` : ''}>${ctag ? `<span style="display:inline-block; background:${ctag.color}; color:#fff; font-size:11px; font-weight:900; padding:2px 6px; border-radius:4px; margin-right:6px; vertical-align:middle;">${escapeHtml(ctag.text)}</span>` : ''}${escapeHtml(item.name)}</p>
         ${sizeRowsHtml}
       </div>
       <div style="display:flex; align-items:center; gap:6px; padding:8px 10px; border-top:1.5px solid var(--line); background:var(--navy);">
@@ -3179,6 +3216,19 @@ exportBtn.addEventListener('click', async () => {
       doc.setFontSize(nameSize);
       doc.setTextColor(20,20,20);
       let cursorY = y + imgH + nameSize * 0.42;
+      const pdfTag = currentCatalogueTag();
+      if (pdfTag){
+        // coloured catalogue tag on the photo's top-left corner
+        const [tr, tg, tb] = hexToRgb(pdfTag.color);
+        doc.setFontSize(11);
+        const tw = Math.min(cellW - 6, doc.getTextWidth(pdfTag.text) + 5);
+        doc.setFillColor(tr, tg, tb);
+        doc.rect(x + 1.5, y + 1.5, tw, 6.5, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.text(pdfTag.text, x + 4, y + 6.3);
+        doc.setFontSize(nameSize);
+        doc.setTextColor(tr, tg, tb);
+      }
       nameLines.forEach(line => {
         if (cursorY <= bottomLimit){
           doc.text(line, x + 2, cursorY);
