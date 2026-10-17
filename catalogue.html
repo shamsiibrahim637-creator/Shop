@@ -945,6 +945,7 @@ window.__switchView = function(){};
     <div id="tag-row" style="margin-top:12px; font-family:Arial,sans-serif;">
       <div style="font-size:13px; font-weight:700; color:#c9c9c9; margin-bottom:6px;">🏷 Colour tag for this catalogue <span style="font-weight:400; color:#8a8a8a;">(shows on every product, in PDFs and in Billing)</span></div>
       <div id="tag-chips" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; font-weight:700; color:#c9c9c9;"><input type="checkbox" id="dims-toggle" style="width:18px; height:18px;"> 📐 Dimension field for this catalogue <span style="font-weight:400; color:#8a8a8a;">(on for LOOSE)</span></label>
     </div>
     <div id="catalogue-name-row" style="display:none; margin-top:12px; gap:8px;">
       <input type="text" id="catalogue-name-input" placeholder="Catalogue name" style="flex:1; padding:12px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:17px; margin-bottom:8px; width:100%;">
@@ -1006,6 +1007,7 @@ window.__switchView = function(){};
         <input type="number" id="var-inch" placeholder="Inch (12)" style="flex:1; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:19px;">
         <input type="number" id="var-price" placeholder="MRP (200)" style="flex:1; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:19px;">
       </div>
+      <input type="text" id="var-dim" placeholder="📐 Dimension (e.g. 8 x 8 cm, 4 x 4 x 2 inch)" style="display:none; width:100%; box-sizing:border-box; margin-top:8px; padding:13px; border-radius:6px; border:1.5px solid var(--line); background:var(--navy); color:var(--cream); font-family:Arial,sans-serif; font-weight:700; font-size:17px;">
       <button type="button" id="add-var-btn" style="width:100%; margin-top:8px; background:var(--navy); border:1.5px solid var(--brass); color:var(--brass-light); padding:12px; border-radius:6px; font-family:Arial,sans-serif; font-size:16px; font-weight:800; cursor:pointer;">+ Add Size / Price</button>
     </div>
 
@@ -1094,6 +1096,12 @@ const catalogueSelect = document.getElementById('catalogue-select');
 const headerSubtitle = document.getElementById('header-subtitle');
 const newCatalogueBtn = document.getElementById('new-catalogue-btn');
 const renameCatalogueBtn = document.getElementById('rename-catalogue-btn');
+document.getElementById('dims-toggle').addEventListener('change', async (e) => {
+  const cat = catalogues.find(x => x.id === currentCatalogueId); if (!cat) return;
+  cat.useDims = e.target.checked;
+  syncDimUi(); renderGrid(); renderVariationRows();
+  try { await saveCatalogueList(); } catch (err) { alert('Could not save — check internet.'); }
+});
 document.getElementById('combo-maker-btn').addEventListener('click', () => { location.href = 'combo.html'; });
 const deleteCatalogueBtn = document.getElementById('delete-catalogue-btn');
 const catalogueNameRow = document.getElementById('catalogue-name-row');
@@ -1149,7 +1157,20 @@ function currentCatalogueTag(){
   return c && c.tagColor ? { color: c.tagColor, text: String(c.name || '').toUpperCase() } : null;
 }
 function hexToRgb(h){ const n = parseInt(String(h).replace('#', ''), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+// 📐 Dimension field — on for the LOOSE catalogue (or any catalogue where it's switched on)
+function dimsEnabled(catId){
+  const c = catalogues.find(x => x.id === (catId || currentCatalogueId));
+  if (!c) return false;
+  return c.useDims === undefined ? /loose/i.test(c.name || '') : !!c.useDims;
+}
+function dimText(v){ return v && v.dim ? String(v.dim).trim() : ''; }
+function syncDimUi(){
+  const on = dimsEnabled();
+  const inp = document.getElementById('var-dim'); if (inp) inp.style.display = on ? 'block' : 'none';
+  const cb = document.getElementById('dims-toggle'); if (cb) cb.checked = on;
+}
 function renderTagChips(){
+  syncDimUi();
   const box = document.getElementById('tag-chips'); if (!box) return;
   const c = catalogues.find(x => x.id === currentCatalogueId);
   const cur = (c && c.tagColor) || '';
@@ -2348,7 +2369,7 @@ function comboRenderParts(){
       <div style="flex:1; min-width:0;">
         <div style="font-size:11px; font-weight:800; color:#a9a9a9; letter-spacing:0.5px;">${escapeHtml(comboPartLabel(i, n))}</div>
         <div style="font-size:15px; font-weight:800; color:#fff; margin-top:2px;">${p ? escapeHtml(p.item.name) + ' — Size ' + escapeHtml(p.v.code || '-') : 'Not chosen yet'}</div>
-        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}</div>
+        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}${p.v.dim ? ' · 📐 ' + escapeHtml(p.v.dim) : ''}</div>
         <div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; font-weight:700; color:${comboPartInch(p) ? '#c9c9c9' : '#e0705a'};">Real height <input type="number" class="cm-pinch" inputmode="decimal" value="${comboPartInch(p) || ''}" placeholder="?" style="width:62px; padding:5px; border-radius:5px; border:1.5px solid ${comboPartInch(p) ? '#555' : '#e0705a'}; background:#0b0b0b; color:#fff; font-weight:800; font-size:13px; text-align:center;"> inch${comboPartInch(p) ? '' : ' ⚠️ enter it'}</div>` : ''}
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
@@ -2406,7 +2427,7 @@ function comboShowSizes(it){
   (vars.length ? vars : [{ code: '', inch: '', price: '' }]).forEach(v => {
     const b = document.createElement('button'); b.type = 'button';
     b.style.cssText = 'padding:10px 14px; border-radius:8px; border:2px solid #f0c341; background:#141414; color:#f0c341; font-weight:800; font-size:14px;' + (v.outOfStock ? ' opacity:0.5;' : '');
-    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
+    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.dim ? '📐 ' + v.dim : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
     b.onclick = () => { comboState.parts[comboPickSlot] = { item: it, v, catId: comboState.src }; q('.cm-picker').style.display = 'none'; comboRenderParts(); comboRebuild(); };
     wrap.appendChild(b);
   });
@@ -2999,6 +3020,7 @@ const fileNameEl = document.getElementById('file-name');
 const nameInput = document.getElementById('item-name');
 const varCodeInput = document.getElementById('var-code');
 const varInchInput = document.getElementById('var-inch');
+const varDimInput = document.getElementById('var-dim');
 const varPriceInput = document.getElementById('var-price');
 const addVarBtn = document.getElementById('add-var-btn');
 const variationRows = document.getElementById('variation-rows');
@@ -3106,7 +3128,7 @@ function renderVariationRows(){
   pendingVariations.forEach((v, idx) => {
     const row = document.createElement('div');
     row.className = 'var-chip';
-    const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join(' — ');
+    const label = [v.code, v.inch ? v.inch + '"' : '', dimText(v) ? '📐 ' + dimText(v) : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join(' — ');
     row.innerHTML = `
       <span>${escapeHtml(label)}</span>
       <span style="display:flex; gap:10px;">
@@ -3124,6 +3146,7 @@ function renderVariationRows(){
       varCodeInput.value = v.code || '';
       varInchInput.value = v.inch || '';
       varPriceInput.value = v.price || '';
+      varDimInput.value = v.dim || '';
       editingVarIndex = idx;
       addVarBtn.textContent = '✓ Update Size / Price';
       varCodeInput.focus();
@@ -3138,6 +3161,7 @@ function renderVariationRows(){
         varCodeInput.value = '';
         varInchInput.value = '';
         varPriceInput.value = '';
+        varDimInput.value = '';
         addVarBtn.textContent = '+ Add Size / Price';
       }
       renderVariationRows();
@@ -3149,19 +3173,22 @@ addVarBtn.addEventListener('click', () => {
   const code = varCodeInput.value.trim();
   const inch = varInchInput.value.trim();
   const price = varPriceInput.value.trim();
-  if (!code && !inch && !price) return;
+  const dim = dimsEnabled() ? varDimInput.value.trim() : '';
+  if (!code && !inch && !price && !dim) return;
+  const keepDim = (o) => { if (dim) o.dim = dim; else if (editingVarIndex !== null && !dimsEnabled() && pendingVariations[editingVarIndex] && pendingVariations[editingVarIndex].dim) o.dim = pendingVariations[editingVarIndex].dim; return o; };
 
   if (editingVarIndex !== null){
-    pendingVariations[editingVarIndex] = { code, inch, price };
+    pendingVariations[editingVarIndex] = keepDim({ code, inch, price });
     editingVarIndex = null;
     addVarBtn.textContent = '+ Add Size / Price';
   } else {
-    pendingVariations.push({ code, inch, price });
+    pendingVariations.push(keepDim({ code, inch, price }));
   }
 
   varCodeInput.value = '';
   varInchInput.value = '';
   varPriceInput.value = '';
+  varDimInput.value = '';
   renderVariationRows();
 });
 
@@ -3197,6 +3224,7 @@ function resetForm(){
   varCodeInput.value = '';
   varInchInput.value = '';
   varPriceInput.value = '';
+  varDimInput.value = '';
   addVarBtn.textContent = '+ Add Size / Price';
   renderVariationRows();
   addBtn.textContent = '+ Add to Catalogue';
@@ -3224,11 +3252,14 @@ addBtn.addEventListener('click', () => {
   const leftoverCode = varCodeInput.value.trim();
   const leftoverInch = varInchInput.value.trim();
   const leftoverPrice = varPriceInput.value.trim();
-  if (leftoverCode || leftoverInch || leftoverPrice){
+  const leftoverDim = dimsEnabled() ? varDimInput.value.trim() : '';
+  if (leftoverCode || leftoverInch || leftoverPrice || leftoverDim){
+    const lv = { code: leftoverCode, inch: leftoverInch, price: leftoverPrice };
+    if (leftoverDim) lv.dim = leftoverDim;
     if (editingVarIndex !== null){
-      pendingVariations[editingVarIndex] = { code: leftoverCode, inch: leftoverInch, price: leftoverPrice };
+      pendingVariations[editingVarIndex] = lv;
     } else {
-      pendingVariations.push({ code: leftoverCode, inch: leftoverInch, price: leftoverPrice });
+      pendingVariations.push(lv);
     }
   }
 
@@ -3513,6 +3544,14 @@ function buildInlineEditor(item){
       renderGrid();
     });
     rowsBox.appendChild(row);
+    if (dimsEnabled()){
+      const dimInp = document.createElement('input');
+      dimInp.type = 'text'; dimInp.className = 'ie-dim'; dimInp.placeholder = '📐 Dimension (e.g. 8 x 8 cm)';
+      dimInp.style.cssText = inputCss + ' width:100%; box-sizing:border-box; margin:-2px 0 8px;';
+      dimInp.value = v.dim || '';
+      dimInp.addEventListener('input', () => { d.variations[i].dim = dimInp.value; });
+      rowsBox.appendChild(dimInp);
+    }
   });
 
   card.querySelector('.ie-add').addEventListener('click', () => {
@@ -3601,7 +3640,7 @@ function renderGrid(){
     const index = items.findIndex(i => i.id === item.id);
     if (item.id === inlineEditId && inlineDraft){ grid.appendChild(buildInlineEditor(item)); return; }
     const sizeRowsHtml = (item.variations || []).map((v, vIdx) => {
-      const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join('-');
+      const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join('-') + (dimText(v) ? '  📐 ' + dimText(v) : '');
       if (!label) return '';
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
@@ -3868,6 +3907,7 @@ exportBtn.addEventListener('click', async () => {
           const parts = [];
           if (v.code) parts.push(v.code);
           if (v.inch) parts.push(v.inch + '"');
+          if (v.dim) parts.push(String(v.dim).trim());
           if (v.price) parts.push('Rs.' + v.price + ' MRP');
           const line = parts.join('  -  ');
           if (line) totalLines.push(...doc.splitTextToSize(line, maxTextWidth));

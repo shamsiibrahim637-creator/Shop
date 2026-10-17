@@ -899,7 +899,7 @@ function comboRenderParts(){
       <div style="flex:1; min-width:0;">
         <div style="font-size:11px; font-weight:800; color:#a9a9a9; letter-spacing:0.5px;">${escapeHtml(comboPartLabel(i, n))}</div>
         <div style="font-size:15px; font-weight:800; color:#fff; margin-top:2px;">${p ? escapeHtml(p.item.name) + ' — Size ' + escapeHtml(p.v.code || '-') : 'Not chosen yet'}</div>
-        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}</div>
+        ${p ? `<div style="font-size:13px; color:#f0c341; font-weight:700;">MRP ₹${comboPrice(p.v)}${p.v.dim ? ' · 📐 ' + escapeHtml(p.v.dim) : ''}</div>
         <div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; font-weight:700; color:${comboPartInch(p) ? '#c9c9c9' : '#e0705a'};">Real height <input type="number" class="cm-pinch" inputmode="decimal" value="${comboPartInch(p) || ''}" placeholder="?" style="width:62px; padding:5px; border-radius:5px; border:1.5px solid ${comboPartInch(p) ? '#555' : '#e0705a'}; background:#0b0b0b; color:#fff; font-weight:800; font-size:13px; text-align:center;"> inch${comboPartInch(p) ? '' : ' ⚠️ enter it'}</div>` : ''}
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
@@ -957,7 +957,7 @@ function comboShowSizes(it){
   (vars.length ? vars : [{ code: '', inch: '', price: '' }]).forEach(v => {
     const b = document.createElement('button'); b.type = 'button';
     b.style.cssText = 'padding:10px 14px; border-radius:8px; border:2px solid #f0c341; background:#141414; color:#f0c341; font-weight:800; font-size:14px;' + (v.outOfStock ? ' opacity:0.5;' : '');
-    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
+    b.textContent = [v.code ? 'Size ' + v.code : 'Standard', v.inch ? v.inch + '"' : '', v.dim ? '📐 ' + v.dim : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ') + (v.outOfStock ? ' (out)' : '');
     b.onclick = () => { comboState.parts[comboPickSlot] = { item: it, v, catId: comboState.src }; q('.cm-picker').style.display = 'none'; comboRenderParts(); comboRebuild(); };
     wrap.appendChild(b);
   });

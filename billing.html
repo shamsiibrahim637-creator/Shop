@@ -1391,7 +1391,7 @@ async function readCloudCatalogueProducts(onBatch){
         try { item = JSON.parse(r.value); } catch (e) { return; }
         if (item.outOfStock) return;
         const vars = item.variations && item.variations.length ? item.variations : [{}];
-        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: item.thumb || item.dataUrl || '' }));
+        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', dim: v.dim || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: item.thumb || item.dataUrl || '' }));
         products.push(...out);
         if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
       })));
@@ -1608,7 +1608,7 @@ function buildProductCard(name, variants){
   card.appendChild(header);
 
   variants.forEach(v => {
-    const label = [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' — ') || 'Standard';
+    const label = [v.code, v.inch ? v.inch + '"' : '', v.dim ? '📐 ' + v.dim : ''].filter(Boolean).join(' — ') || 'Standard';
     const row = document.createElement('div');
     row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;';
     row.innerHTML = `
@@ -1624,7 +1624,7 @@ function buildProductCard(name, variants){
     row.querySelector('.pr-add-btn').addEventListener('click', () => {
       const qty = Math.max(1, parseInt(qtyInput.value, 10) || 1);
       const rate = parseFloat(rateInput.value) || 0;
-      const sizeLabel = [v.code, v.inch ? v.inch + '"' : ''].filter(Boolean).join(' ');
+      const sizeLabel = [v.code, v.inch ? v.inch + '"' : '', v.dim ? '(' + v.dim + ')' : ''].filter(Boolean).join(' ');
       currentItems.push({ name, size: sizeLabel, qty, rate, photo: v.photo || photo || '', catalogue: catName, tagColor });
       renderBillItems();
       billStatusMsg.textContent = '1 size added to the bill — keep searching to add more items.';
