@@ -2212,7 +2212,7 @@ function buildBillPDFDoc(bill){
   const pdfAdvance = parseFloat(bill.advance) || 0;
   const pdfRoundOff = parseFloat(bill.roundOff) || 0;
   const pdfOld = billOldBalance(bill);
-  if (y + 105 + (pdfOld > 0 ? 14 : 0) + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
+  if (y + 105 + 26 + (pdfOld > 0 ? 14 : 0) + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
     doc.addPage();
     y = 20;
   }
@@ -2318,7 +2318,22 @@ function buildBillPDFDoc(bill){
   const transportLines = doc.splitTextToSize(transportNote, pageWidth-40);
   doc.text(transportLines, 18, ty);
 
-  y += transportBoxH + 8;
+  y += transportBoxH + 4;
+  // Transport damage disclaimer
+  {
+    const dmgText = 'We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company.';
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+    const dmgLines = doc.splitTextToSize(dmgText, pageWidth - 40);
+    const boxH = 9 + dmgLines.length * 3.8;
+    if (y + boxH + 10 > 290){ doc.addPage(); y = 20; }
+    doc.setDrawColor(179,70,44); doc.setLineWidth(0.4);
+    doc.rect(15, y, pageWidth - 30, boxH);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(179,70,44);
+    doc.text('TRANSPORT DAMAGE DISCLAIMER:', 18, y + 5.5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(70,70,70);
+    doc.text(dmgLines, 18, y + 10);
+    y += boxH + 8;
+  }
   doc.setFont('helvetica', 'italic');
   doc.setFontSize(10);
   doc.setTextColor(120,120,120);
@@ -2401,6 +2416,7 @@ function buildEstimateText(bill){
   if (bill.transportName) lines.push('Transport: ' + bill.transportName);
   lines.push('');
   lines.push('_Transportation/freight charges are not included and will be charged separately._');
+  lines.push('*TRANSPORT DAMAGE DISCLAIMER:* _We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company._');
   lines.push('_Please check all details before confirming._');
   if (shopSettings.phone) lines.push('📞 ' + shopSettings.phone);
   return lines.join('\n');
