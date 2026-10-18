@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Money">
+<title>Money</title>
+<link rel="manifest" href="money.webmanifest">
+<link rel="apple-touch-icon" href="money-icon-192.png">
+<link rel="icon" href="money-icon-192.png">
+<style>
+  :root{ --gold:#f0c341; --gold-2:#b8912f; --bg:#050505; --card:#141414; --card2:#0d0d0d; --line:#2a2a2a; --text:#f2e8cf; --muted:#9a9a9a; --in:#4cd07d; --out:#ef6b5b; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; -webkit-tap-highlight-color:transparent; }
+  .wrap{ max-width:560px; margin:0 auto; padding:12px 14px 120px; }
+  header{ display:flex; align-items:center; gap:8px; padding:10px 14px; position:sticky; top:0; z-index:5; background:rgba(5,5,5,0.96); border-bottom:1px solid var(--line); }
+  header h1{ flex:1; margin:0; font-family:Georgia, serif; color:var(--gold); font-size:22px; letter-spacing:1px; }
+  .hbtn{ background:none; border:1.5px solid var(--line); color:#c9c9c9; border-radius:8px; padding:7px 10px; font-weight:800; font-size:13px; }
+  .tabs{ display:flex; gap:6px; margin:12px 0; }
+  .tab{ flex:1; padding:11px 4px; border-radius:10px; border:1.5px solid var(--gold-2); background:none; color:var(--gold); font-weight:800; font-size:13px; line-height:1.25; }
+  .tab.active{ background:var(--gold); color:#000; }
+  .card{ background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .card h2{ margin:0 0 10px; font-size:13px; letter-spacing:1px; color:var(--gold); text-transform:uppercase; }
+  .bal{ text-align:center; }
+  .bal .big{ font-size:34px; font-weight:900; margin:4px 0 10px; }
+  .row3{ display:flex; gap:8px; }
+  .row3 > div{ flex:1; background:var(--card2); border-radius:10px; padding:10px 6px; text-align:center; }
+  .row3 .lbl{ font-size:11px; color:var(--muted); font-weight:700; }
+  .row3 .val{ font-size:17px; font-weight:900; margin-top:3px; }
+  .in{ color:var(--in); } .out{ color:var(--out); }
+  .btn{ border:none; border-radius:10px; padding:13px; font-weight:800; font-size:15px; cursor:pointer; }
+  .btn.in{ background:var(--in); color:#00170a; } .btn.out{ background:var(--out); color:#200000; }
+  .btn.gold{ background:var(--gold); color:#000; } .btn.ghost{ background:none; border:1.5px solid var(--line); color:#ddd; }
+  .btns{ display:flex; gap:8px; margin-top:10px; } .btns .btn{ flex:1; }
+  .filters{ display:flex; gap:8px; margin-bottom:10px; }
+  select, input, textarea{ width:100%; padding:11px; border-radius:8px; border:1.5px solid #333; background:#0b0b0b; color:#fff; font-size:15px; font-weight:700; font-family:Arial,sans-serif; }
+  label.lb{ display:block; font-size:12px; color:var(--muted); font-weight:700; margin:10px 0 5px; }
+  .entry{ display:flex; align-items:center; gap:10px; padding:11px 2px; border-bottom:1px solid var(--line); }
+  .entry .ic{ width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; background:#1d1d1d; }
+  .entry .mid{ flex:1; min-width:0; }
+  .entry .t1{ font-weight:800; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .entry .t2{ font-size:12px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .entry .amt{ font-weight:900; font-size:16px; white-space:nowrap; }
+  .day{ font-size:12px; font-weight:800; color:var(--gold-2); margin:14px 0 2px; letter-spacing:0.5px; }
+  .empty{ text-align:center; color:var(--muted); padding:22px 6px; font-size:14px; line-height:1.5; }
+  .bar{ height:10px; border-radius:6px; background:#222; overflow:hidden; }
+  .bar > div{ height:100%; border-radius:6px; }
+  .catrow{ margin:8px 0; font-size:13px; }
+  .catrow .top{ display:flex; justify-content:space-between; font-weight:700; margin-bottom:4px; }
+  .modal{ position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:50; display:none; align-items:flex-end; justify-content:center; }
+  .sheet{ background:#111; width:100%; max-width:560px; border-radius:18px 18px 0 0; padding:16px 16px 28px; max-height:92vh; overflow:auto; border-top:2px solid var(--gold-2); }
+  .sheet h3{ margin:0 0 6px; color:var(--gold); font-size:18px; }
+  .chips{ display:flex; flex-wrap:wrap; gap:6px; }
+  .chip{ padding:8px 11px; border-radius:16px; border:1.5px solid #3a3a3a; background:#161616; color:#ddd; font-weight:700; font-size:13px; }
+  .chip.on{ background:var(--gold); color:#000; border-color:var(--gold); }
+  .seg{ display:flex; border:1.5px solid #333; border-radius:10px; overflow:hidden; }
+  .seg button{ flex:1; padding:11px; border:none; background:#0b0b0b; color:#ccc; font-weight:800; font-size:15px; }
+  .seg button.on-in{ background:var(--in); color:#00170a; } .seg button.on-out{ background:var(--out); color:#200000; }
+  .note{ font-size:12px; color:var(--muted); line-height:1.5; margin-top:8px; }
+  .kv{ display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #2a2a2a; font-size:14px; }
+  .kv b{ font-weight:900; }
+  .mbars{ display:flex; align-items:flex-end; gap:8px; height:120px; margin-top:8px; }
+  .mbars .m{ flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; height:100%; justify-content:flex-end; }
+  .mbars .pair{ display:flex; gap:2px; align-items:flex-end; height:100%; width:100%; justify-content:center; }
+  .mbars .pair div{ width:42%; border-radius:4px 4px 0 0; min-height:2px; }
+  .mbars .ml{ font-size:10px; color:var(--muted); font-weight:700; }
+  #lock{ position:fixed; inset:0; z-index:100; background:#050505; display:none; flex-direction:column; align-items:center; justify-content:center; padding:24px; }
+  .toast{ position:fixed; left:50%; bottom:90px; transform:translateX(-50%); background:#222; color:#fff; padding:11px 16px; border-radius:10px; font-weight:700; font-size:14px; z-index:200; display:none; border:1px solid #444; }
+  .fab{ position:fixed; right:16px; bottom:18px; z-index:20; display:flex; gap:10px; }
+  .fab .btn{ box-shadow:0 6px 18px rgba(0,0,0,0.6); padding:15px 18px; font-size:16px; border-radius:30px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>💰 Money</h1>
+  <button class="hbtn" id="install-btn" style="display:none;">📲 Add</button>
+  <button class="hbtn" id="menu-btn">⚙️</button>
+</header>
+
+<div class="wrap">
+  <div class="tabs">
+    <button class="tab" data-book="zakat">🕌<br>Zakat</button>
+    <button class="tab" data-book="allah">🤲<br>In the Name of Allah</button>
+    <button class="tab" data-book="personal">👤<br>Personal</button>
+  </div>
+  <div id="view"></div>
+</div>
+
+<div class="fab"><button class="btn in" id="fab-in">＋ In</button><button class="btn out" id="fab-out">－ Out</button></div>
+
+<!-- add / edit entry -->
+<div class="modal" id="entry-modal"><div class="sheet">
+  <h3 id="em-title">New entry</h3>
+  <div class="seg" style="margin:10px 0;"><button type="button" id="em-type-in">⬇ In (received)</button><button type="button" id="em-type-out">⬆ Out (spent / given)</button></div>
+  <label class="lb">Amount (₹)</label>
+  <input type="number" id="em-amount" inputmode="decimal" placeholder="0" style="font-size:26px; font-weight:900;">
+  <label class="lb">Category</label>
+  <div class="chips" id="em-cats"></div>
+  <input type="text" id="em-cat-other" placeholder="Type a category" style="display:none; margin-top:8px;">
+  <div style="display:flex; gap:8px;">
+    <div style="flex:1;"><label class="lb">Date</label><input type="date" id="em-date"></div>
+    <div style="flex:1;"><label class="lb">Paid by</label><select id="em-mode"><option>Cash</option><option>UPI</option><option>Bank</option><option>Card</option><option>Cheque</option></select></div>
+  </div>
+  <label class="lb" id="em-person-lbl">To / from (name) — optional</label>
+  <input type="text" id="em-person" placeholder="e.g. Madrasa, Ahmed bhai">
+  <label class="lb">Note — optional</label>
+  <input type="text" id="em-note" placeholder="Anything to remember">
+  <div class="btns"><button class="btn gold" id="em-save">💾 Save</button><button class="btn ghost" id="em-cancel">Cancel</button></div>
+  <button class="btn ghost" id="em-delete" style="width:100%; margin-top:8px; color:var(--out); border-color:#5a2a25; display:none;">🗑 Delete this entry</button>
+</div></div>
+
+<!-- zakat calculator -->
+<div class="modal" id="zakat-modal"><div class="sheet">
+  <h3>🕌 Zakat Calculator</h3>
+  <div class="note" style="margin-top:0;">Enter what you own today. Zakat is 2.5% of your zakatable wealth if it is above the Nisab and you have held it for one Islamic (lunar) year. Rules differ a little between scholars — please confirm with your local Aalim.</div>
+  <label class="lb">Cash at home & in shop (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="cash">
+  <label class="lb">Money in bank / UPI / wallets (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="bank">
+  <div style="display:flex; gap:8px;">
+    <div style="flex:1;"><label class="lb">Gold (grams)</label><input type="number" inputmode="decimal" class="zk" data-k="goldG"></div>
+    <div style="flex:1;"><label class="lb">Gold rate ₹ / gram</label><input type="number" inputmode="decimal" class="zk" data-k="goldRate"></div>
+  </div>
+  <div style="display:flex; gap:8px;">
+    <div style="flex:1;"><label class="lb">Silver (grams)</label><input type="number" inputmode="decimal" class="zk" data-k="silverG"></div>
+    <div style="flex:1;"><label class="lb">Silver rate ₹ / gram</label><input type="number" inputmode="decimal" class="zk" data-k="silverRate"></div>
+  </div>
+  <label class="lb">Business stock for sale (shop goods at cost) (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="stock">
+  <label class="lb">Money others owe you that you expect back (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="receivable">
+  <label class="lb">Other zakatable savings / investments (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="other">
+  <label class="lb">Minus: debts & bills due now (₹)</label><input type="number" inputmode="decimal" class="zk" data-k="debts">
+  <label class="lb">Nisab based on</label>
+  <select id="zk-basis"><option value="silver">Silver — 612.36 g (most common in India)</option><option value="gold">Gold — 87.48 g</option></select>
+  <label class="lb">Your Zakat date (when your Islamic year completes)</label><input type="date" id="zk-date">
+  <div class="card" style="margin-top:12px; background:#0d0d0d;" id="zk-result"></div>
+  <div class="btns"><button class="btn gold" id="zk-save">✅ Set as this year's Zakat due</button><button class="btn ghost" id="zk-close">Close</button></div>
+</div></div>
+
+<!-- udhaar -->
+<div class="modal" id="udh-modal"><div class="sheet">
+  <h3 id="udh-title">🤝 Udhaar (lend / borrow)</h3>
+  <div class="seg" style="margin:10px 0;"><button type="button" id="udh-lent">I gave (lent)</button><button type="button" id="udh-borrowed">I took (borrowed)</button></div>
+  <label class="lb">Person</label><input type="text" id="udh-person" placeholder="Name">
+  <div style="display:flex; gap:8px;">
+    <div style="flex:1;"><label class="lb">Amount (₹)</label><input type="number" inputmode="decimal" id="udh-amount"></div>
+    <div style="flex:1;"><label class="lb">Date</label><input type="date" id="udh-date"></div>
+  </div>
+  <label class="lb">Note — optional</label><input type="text" id="udh-note">
+  <div class="note">This is also added to your Personal money as Out (lent) or In (borrowed). When it is paid back, tap "✓ Settled" and the return is added automatically.</div>
+  <div class="btns"><button class="btn gold" id="udh-save">💾 Save</button><button class="btn ghost" id="udh-cancel">Cancel</button></div>
+</div></div>
+
+<!-- menu -->
+<div class="modal" id="menu-modal"><div class="sheet">
+  <h3>⚙️ Settings & Backup</h3>
+  <div class="note" style="margin-top:0;">🔒 Your money data is saved <b>only on this phone</b> (not in the cloud). If Chrome data is cleared or the phone is changed, it is gone — so take a backup now and then and keep it in Google Drive or WhatsApp to yourself.</div>
+  <div id="backup-age" class="note" style="color:var(--gold);"></div>
+  <div class="btns"><button class="btn gold" id="bk-export">⬇ Backup (save file)</button><button class="btn ghost" id="bk-import">⬆ Restore backup</button></div>
+  <input type="file" id="bk-file" accept="application/json,.json" style="display:none;">
+  <button class="btn ghost" id="bk-csv" style="width:100%; margin-top:8px;">📄 Export to Excel (CSV)</button>
+  <label class="lb" style="margin-top:16px;">App lock</label>
+  <div class="btns" style="margin-top:0;"><button class="btn ghost" id="pin-set">🔒 Set / change PIN</button><button class="btn ghost" id="pin-off">Remove PIN</button></div>
+  <button class="btn ghost" id="menu-close" style="width:100%; margin-top:14px;">Close</button>
+</div></div>
+
+<div id="lock">
+  <div style="font-size:44px;">🔒</div>
+  <div style="font-family:Georgia,serif; color:var(--gold); font-size:24px; margin:6px 0 16px;">Money</div>
+  <input type="password" id="lock-pin" inputmode="numeric" maxlength="8" placeholder="PIN" style="max-width:240px; text-align:center; font-size:24px; letter-spacing:6px;">
+  <button class="btn gold" id="lock-go" style="margin-top:12px; width:240px;">Unlock</button>
+  <div id="lock-err" style="color:var(--out); font-weight:700; margin-top:10px; min-height:18px;"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ===================== Money (kept only on this phone) =====================
+const BOOKS = {
+  zakat: { name: 'Zakat', icon: '🕌', inLabel: 'Set aside', outLabel: 'Paid',
+    inCats: ['Zakat set aside', 'Business profit', 'Savings', 'Other'],
+    outCats: ['Poor & needy', 'Relative in need', 'Madrasa student', 'Debt relief', 'Traveller in need', 'Other'] },
+  allah: { name: 'In the Name of Allah', icon: '🤲', inLabel: 'Kept for Allah', outLabel: 'Given',
+    inCats: ['Kept aside (Lillah)', 'Mannat', 'Received for charity', 'Other'],
+    outCats: ['Sadaqah', 'Masjid', 'Madrasa', 'Fitra', 'Qurbani', 'Help to needy', 'Orphans', 'Iftar / food', 'Other'] },
+  personal: { name: 'Personal', icon: '👤', inLabel: 'Income', outLabel: 'Expense',
+    inCats: ['Shop / business', 'Salary', 'Gift', 'Rent received', 'Loan taken', 'Loan returned to me', 'Other'],
+    outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Other'] }
+};
+const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
+
+// ---- tiny local database (IndexedDB) ----
+const DB_NAME = 'shopapp-money';
+function idb(){ return new Promise((res, rej) => { const r = indexedDB.open(DB_NAME, 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function dbGet(k){ const db = await idb(); return new Promise((res) => { const g = db.transaction('kv').objectStore('kv').get(k); g.onsuccess = () => res(g.result); g.onerror = () => res(undefined); }); }
+async function dbSet(k, v){ const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('Not saved')); }); }
+
+let state = { entries: [], udhaar: [], zakat: { calc: {}, due: null }, lastBackup: 0 };
+let book = 'personal', month = 'all';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n) => '₹' + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-IN');
+const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+const fmtDate = (s) => { if (!s) return ''; const [y, m, d] = s.split('-'); return d + '-' + m + '-' + y; };
+const monthName = (ym) => { const [y, m] = ym.split('-'); return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m) - 1] + ' ' + y; };
+function toast(t){ const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
+async function save(){
+  try { await dbSet('state', JSON.parse(JSON.stringify(state))); }
+  catch (e) { alert('⚠️ Could not save on this phone: ' + (e && e.message ? e.message : e)); }
+}
+const newId = () => Date.now() + Math.floor(Math.random() * 1000);
+
+// ---- totals ----
+function bookEntries(b){ return state.entries.filter(e => e.book === b); }
+function totals(list){ let i = 0, o = 0; list.forEach(e => { if (e.type === 'in') i += Number(e.amount) || 0; else o += Number(e.amount) || 0; }); return { in: i, out: o, bal: i - o }; }
+
+// ---- rendering ----
+function render(){
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.book === book));
+  const B = BOOKS[book];
+  const all = bookEntries(book).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
+  const months = [...new Set(all.map(e => (e.date || '').slice(0, 7)).filter(Boolean))];
+  if (month !== 'all' && !months.includes(month)) month = 'all';
+  const shown = month === 'all' ? all : all.filter(e => (e.date || '').startsWith(month));
+  const tAll = totals(all), tShown = totals(shown);
+  let h = '';
+  // balance card
+  h += `<div class="card bal"><div class="lbl" style="color:var(--muted); font-weight:700; font-size:13px;">${B.icon} ${esc(B.name)}${book === 'zakat' && tAll.in === 0 ? '' : ' — balance'}</div>
+    ${book === 'zakat' && tAll.in === 0 ? `<div class="big in">${money(tAll.out)}</div><div class="note" style="margin:-6px 0 10px;">Total Zakat paid</div>` : `<div class="big ${tAll.bal < 0 ? 'out' : ''}">${money(tAll.bal)}</div>`}
+    <div class="row3"><div><div class="lbl">${B.inLabel} (In)</div><div class="val in">${money(tAll.in)}</div></div><div><div class="lbl">${B.outLabel} (Out)</div><div class="val out">${money(tAll.out)}</div></div></div></div>`;
+  if (book === 'zakat') h += zakatCard();
+  if (book === 'personal') h += udhaarCard();
+  // month filter + this-month summary
+  h += `<div class="card"><h2>${month === 'all' ? 'All entries' : monthName(month)}</h2>
+    <div class="filters"><select id="month-sel"><option value="all">All months</option>${months.map(m => `<option value="${m}" ${m === month ? 'selected' : ''}>${monthName(m)}</option>`).join('')}</select></div>
+    ${month !== 'all' ? `<div class="row3" style="margin-bottom:8px;"><div><div class="lbl">In</div><div class="val in">${money(tShown.in)}</div></div><div><div class="lbl">Out</div><div class="val out">${money(tShown.out)}</div></div><div><div class="lbl">Net</div><div class="val">${money(tShown.bal)}</div></div></div>` : ''}
+    ${listHtml(shown)}</div>`;
+  h += reportCard(shown, all);
+  $('view').innerHTML = h;
+  $('month-sel').onchange = (e) => { month = e.target.value; render(); };
+  document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
+  const zc = $('zk-open'); if (zc) zc.onclick = openZakat;
+  const ua = $('udh-add'); if (ua) ua.onclick = () => openUdhaar();
+  document.querySelectorAll('[data-settle]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); settleUdhaar(Number(b.dataset.settle)); });
+  document.querySelectorAll('[data-udel]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); deleteUdhaar(Number(b.dataset.udel)); });
+}
+function listHtml(list){
+  if (!list.length) return `<div class="empty">No entries yet.<br>Tap <b class="in">＋ In</b> when money comes, <b class="out">－ Out</b> when it goes.</div>`;
+  let h = '', lastDay = '';
+  list.slice(0, 400).forEach(e => {
+    if (e.date !== lastDay){ lastDay = e.date; h += `<div class="day">${fmtDate(e.date)}</div>`; }
+    h += `<div class="entry" data-id="${e.id}"><div class="ic">${CAT_ICON[e.category] || (e.type === 'in' ? '⬇' : '⬆')}</div>
+      <div class="mid"><div class="t1">${esc(e.category || (e.type === 'in' ? 'In' : 'Out'))}${e.person ? ' · ' + esc(e.person) : ''}</div>
+      <div class="t2">${esc(e.mode || '')}${e.note ? ' · ' + esc(e.note) : ''}</div></div>
+      <div class="amt ${e.type === 'in' ? 'in' : 'out'}">${e.type === 'in' ? '+' : '−'} ${money(e.amount)}</div></div>`;
+  });
+  return h;
+}
+function reportCard(shown, all){
+  // category breakdown of Out for the shown period + last 6 months bars
+  const outs = shown.filter(e => e.type === 'out');
+  const byCat = {}; outs.forEach(e => { byCat[e.category || 'Other'] = (byCat[e.category || 'Other'] || 0) + Number(e.amount || 0); });
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const totalOut = outs.reduce((a, e) => a + Number(e.amount || 0), 0);
+  const now = new Date(); const ms = [];
+  for (let i = 5; i >= 0; i--){ const d = new Date(now.getFullYear(), now.getMonth() - i, 1); ms.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
+  const mt = ms.map(m => totals(all.filter(e => (e.date || '').startsWith(m))));
+  const mx = Math.max(1, ...mt.map(t => Math.max(t.in, t.out)));
+  if (!all.length) return '';
+  return `<div class="card"><h2>📊 Report</h2>
+    <div style="font-size:12px; color:var(--muted); font-weight:700;">Last 6 months — <span class="in">■ In</span> &nbsp; <span class="out">■ Out</span></div>
+    <div class="mbars">${ms.map((m, i) => `<div class="m"><div class="pair"><div style="height:${mt[i].in / mx * 100}%; background:var(--in);"></div><div style="height:${mt[i].out / mx * 100}%; background:var(--out);"></div></div><div class="ml">${monthName(m).slice(0, 3)}</div></div>`).join('')}</div>
+    ${cats.length ? `<div style="margin-top:14px; font-size:12px; color:var(--muted); font-weight:700;">Where the money went (${month === 'all' ? 'all time' : monthName(month)})</div>` + cats.map(([c, v]) => `<div class="catrow"><div class="top"><span>${CAT_ICON[c] || '•'} ${esc(c)}</span><span>${money(v)} · ${Math.round(v / totalOut * 100)}%</span></div><div class="bar"><div style="width:${v / totalOut * 100}%; background:var(--out);"></div></div></div>`).join('') : ''}
+  </div>`;
+}
+function zakatCard(){
+  const due = state.zakat.due;
+  const paidSince = due ? bookEntries('zakat').filter(e => e.type === 'out' && (e.date || '') >= (due.from || '0')).reduce((a, e) => a + Number(e.amount || 0), 0) : 0;
+  const remain = due ? Math.max(0, due.amount - paidSince) : 0;
+  const pct = due && due.amount > 0 ? Math.min(100, paidSince / due.amount * 100) : 0;
+  return `<div class="card"><h2>🕌 This year's Zakat</h2>
+    ${due ? `<div class="kv"><span>Zakat due (2.5%)</span><b>${money(due.amount)}</b></div>
+      <div class="kv"><span>Paid since ${fmtDate(due.from)}</span><b class="in">${money(paidSince)}</b></div>
+      <div class="kv" style="border:none;"><span>Remaining to give</span><b class="${remain > 0 ? 'out' : 'in'}">${remain > 0 ? money(remain) : '✅ Fully paid'}</b></div>
+      <div class="bar" style="margin-top:8px;"><div style="width:${pct}%; background:var(--in);"></div></div>
+      ${due.date ? `<div class="note">Zakat date: <b>${fmtDate(due.date)}</b>${daysTo(due.date)}</div>` : ''}`
+    : `<div class="note" style="margin-top:0;">Work out how much Zakat you have to give this year, then record each payment with <b class="out">－ Out</b>.</div>`}
+    <button class="btn gold" id="zk-open" style="width:100%; margin-top:10px;">🧮 ${due ? 'Recalculate' : 'Calculate'} Zakat</button></div>`;
+}
+function daysTo(d){
+  const diff = Math.round((new Date(d) - new Date(today())) / 86400000);
+  if (isNaN(diff)) return '';
+  if (diff > 0) return ' — in ' + diff + ' day' + (diff === 1 ? '' : 's');
+  if (diff === 0) return ' — <b class="out">today</b>';
+  return ' — <span class="out">' + (-diff) + ' days ago</span>';
+}
+function udhaarCard(){
+  const open = state.udhaar.filter(u => !u.settled);
+  const lent = open.filter(u => u.kind === 'lent').reduce((a, u) => a + Number(u.amount || 0), 0);
+  const borrowed = open.filter(u => u.kind === 'borrowed').reduce((a, u) => a + Number(u.amount || 0), 0);
+  return `<div class="card"><h2>🤝 Udhaar (lend / borrow)</h2>
+    <div class="row3"><div><div class="lbl">Others owe me</div><div class="val in">${money(lent)}</div></div><div><div class="lbl">I owe others</div><div class="val out">${money(borrowed)}</div></div></div>
+    ${open.map(u => `<div class="entry"><div class="ic">🤝</div><div class="mid"><div class="t1">${esc(u.person)}</div><div class="t2">${u.kind === 'lent' ? 'I gave' : 'I took'} · ${fmtDate(u.date)}${u.note ? ' · ' + esc(u.note) : ''}</div></div>
+      <div style="text-align:right;"><div class="amt ${u.kind === 'lent' ? 'in' : 'out'}">${money(u.amount)}</div>
+      <button class="btn ghost" data-settle="${u.id}" style="padding:5px 8px; font-size:12px; margin-top:4px;">✓ Settled</button> <button class="btn ghost" data-udel="${u.id}" style="padding:5px 8px; font-size:12px; margin-top:4px; color:var(--out);">✕</button></div></div>`).join('') || '<div class="note">Nothing pending.</div>'}
+    <button class="btn ghost" id="udh-add" style="width:100%; margin-top:10px;">＋ Add Udhaar</button></div>`;
+}
+
+// ---- add / edit entry ----
+let em = { id: null, type: 'out', cat: '' };
+function openEntry(type, id){
+  const e = id ? state.entries.find(x => x.id === id) : null;
+  em = { id: e ? e.id : null, type: e ? e.type : type, cat: e ? e.category : '' };
+  $('em-title').textContent = (e ? 'Edit' : 'New') + ' — ' + BOOKS[book].icon + ' ' + BOOKS[book].name;
+  $('em-amount').value = e ? e.amount : '';
+  $('em-date').value = e ? e.date : today();
+  $('em-mode').value = e ? (e.mode || 'Cash') : (localStorage.getItem('money-mode') || 'Cash');
+  $('em-person').value = e ? (e.person || '') : '';
+  $('em-note').value = e ? (e.note || '') : '';
+  $('em-delete').style.display = e ? 'block' : 'none';
+  $('em-cat-other').style.display = 'none'; $('em-cat-other').value = '';
+  syncType();
+  $('entry-modal').style.display = 'flex';
+  if (!e) setTimeout(() => $('em-amount').focus(), 100);
+}
+function syncType(){
+  $('em-type-in').className = em.type === 'in' ? 'on-in' : '';
+  $('em-type-out').className = em.type === 'out' ? 'on-out' : '';
+  const cats = em.type === 'in' ? BOOKS[book].inCats : BOOKS[book].outCats;
+  if (em.cat && !cats.includes(em.cat)){ $('em-cat-other').style.display = 'block'; $('em-cat-other').value = em.cat; }
+  $('em-cats').innerHTML = cats.map(c => `<button type="button" class="chip ${c === em.cat || (c === 'Other' && em.cat && !cats.includes(em.cat)) ? 'on' : ''}" data-c="${esc(c)}">${CAT_ICON[c] || ''} ${esc(c)}</button>`).join('');
+  $('em-cats').querySelectorAll('.chip').forEach(b => b.onclick = () => { em.cat = b.dataset.c; $('em-cat-other').style.display = em.cat === 'Other' ? 'block' : 'none'; syncType(); });
+  $('em-person-lbl').textContent = em.type === 'in' ? 'From (name) — optional' : 'To (name) — optional';
+}
+$('em-type-in').onclick = () => { em.type = 'in'; em.cat = ''; syncType(); };
+$('em-type-out').onclick = () => { em.type = 'out'; em.cat = ''; syncType(); };
+$('em-cancel').onclick = () => $('entry-modal').style.display = 'none';
+$('em-save').onclick = async () => {
+  const amount = Math.round((parseFloat($('em-amount').value) || 0) * 100) / 100;
+  if (amount <= 0){ alert('Please enter the amount.'); return; }
+  let cat = em.cat;
+  if (cat === 'Other' || !cat){ cat = $('em-cat-other').value.trim() || (cat || 'Other'); }
+  const data = { book, type: em.type, amount, category: cat, date: $('em-date').value || today(), mode: $('em-mode').value, person: $('em-person').value.trim(), note: $('em-note').value.trim() };
+  localStorage.setItem('money-mode', data.mode);
+  if (em.id){ const i = state.entries.findIndex(x => x.id === em.id); if (i >= 0) state.entries[i] = Object.assign({}, state.entries[i], data); }
+  else state.entries.push(Object.assign({ id: newId(), created: Date.now() }, data));
+  await save();
+  $('entry-modal').style.display = 'none';
+  toast('✅ Saved ' + (em.type === 'in' ? '+ ' : '− ') + money(amount));
+  render();
+};
+$('em-delete').onclick = async () => {
+  if (!confirm('Delete this entry?')) return;
+  state.entries = state.entries.filter(x => x.id !== em.id);
+  await save(); $('entry-modal').style.display = 'none'; toast('Deleted'); render();
+};
+$('fab-in').onclick = () => openEntry('in');
+$('fab-out').onclick = () => openEntry('out');
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => { book = t.dataset.book; month = 'all'; localStorage.setItem('money-book', book); render(); window.scrollTo(0, 0); });
+document.querySelectorAll('.modal').forEach(m => m.addEventListener('click', (e) => { if (e.target === m) m.style.display = 'none'; }));
+
+// ---- Zakat calculator ----
+const NISAB = { silver: 612.36, gold: 87.48 };
+function zakatCalc(){
+  const c = state.zakat.calc || {}; const n = (k) => Math.max(0, parseFloat(c[k]) || 0);
+  const gold = n('goldG') * n('goldRate'), silver = n('silverG') * n('silverRate');
+  const assets = n('cash') + n('bank') + gold + silver + n('stock') + n('receivable') + n('other');
+  const net = assets - n('debts');
+  const basis = c.basis || 'silver';
+  const rate = basis === 'gold' ? n('goldRate') : n('silverRate');
+  const nisab = rate ? NISAB[basis] * rate : 0;
+  const zakat = (nisab && net >= nisab) ? net * 0.025 : 0;
+  return { gold, silver, assets, net, nisab, zakat, basis, rate };
+}
+function showZakatResult(){
+  const r = zakatCalc();
+  $('zk-result').innerHTML = `<div class="kv"><span>Gold value</span><b>${money(r.gold)}</b></div>
+    <div class="kv"><span>Silver value</span><b>${money(r.silver)}</b></div>
+    <div class="kv"><span>Total zakatable wealth</span><b>${money(r.assets)}</b></div>
+    <div class="kv"><span>After debts</span><b>${money(r.net)}</b></div>
+    <div class="kv"><span>Nisab (${r.basis === 'gold' ? '87.48 g gold' : '612.36 g silver'})</span><b>${r.rate ? money(r.nisab) : '— enter ' + r.basis + ' rate'}</b></div>
+    <div style="text-align:center; margin-top:10px;">${!r.rate ? '<span class="note">Enter today\'s ' + r.basis + ' rate per gram to check the Nisab.</span>'
+      : r.net >= r.nisab ? `<div style="font-size:12px; color:var(--muted); font-weight:700;">ZAKAT TO GIVE (2.5%)</div><div style="font-size:30px; font-weight:900; color:var(--gold);">${money(Math.ceil(r.zakat))}</div>`
+      : `<div style="font-weight:800; color:var(--in);">Below Nisab — Zakat is not due on this amount.</div>`}</div>`;
+}
+function openZakat(){
+  const c = state.zakat.calc || {};
+  document.querySelectorAll('.zk').forEach(i => { i.value = c[i.dataset.k] || ''; i.oninput = () => { state.zakat.calc[i.dataset.k] = i.value; showZakatResult(); save(); }; });
+  $('zk-basis').value = c.basis || 'silver';
+  $('zk-date').value = (state.zakat.due && state.zakat.due.date) || c.date || '';
+  showZakatResult();
+  $('zakat-modal').style.display = 'flex';
+}
+$('zk-basis').onchange = () => { state.zakat.calc.basis = $('zk-basis').value; showZakatResult(); save(); };
+$('zk-date').onchange = () => { state.zakat.calc.date = $('zk-date').value; save(); };
+$('zk-close').onclick = () => { $('zakat-modal').style.display = 'none'; render(); };
+$('zk-save').onclick = async () => {
+  const r = zakatCalc();
+  if (!r.rate){ alert('Please enter the ' + r.basis + ' rate per gram first.'); return; }
+  const amount = Math.ceil(r.zakat);
+  if (!amount && !confirm('Your wealth is below Nisab, so Zakat due is ₹0. Save that?')) return;
+  state.zakat.due = { amount, from: today(), date: $('zk-date').value || '', calcOn: today() };
+  await save();
+  $('zakat-modal').style.display = 'none';
+  toast('✅ Zakat due set: ' + money(amount));
+  render();
+};
+
+// ---- Udhaar ----
+let udhKind = 'lent';
+function openUdhaar(){
+  udhKind = 'lent'; syncUdh();
+  $('udh-person').value = ''; $('udh-amount').value = ''; $('udh-note').value = ''; $('udh-date').value = today();
+  $('udh-modal').style.display = 'flex';
+}
+function syncUdh(){ $('udh-lent').className = udhKind === 'lent' ? 'on-in' : ''; $('udh-borrowed').className = udhKind === 'borrowed' ? 'on-out' : ''; }
+$('udh-lent').onclick = () => { udhKind = 'lent'; syncUdh(); };
+$('udh-borrowed').onclick = () => { udhKind = 'borrowed'; syncUdh(); };
+$('udh-cancel').onclick = () => $('udh-modal').style.display = 'none';
+$('udh-save').onclick = async () => {
+  const person = $('udh-person').value.trim(), amount = Math.round((parseFloat($('udh-amount').value) || 0) * 100) / 100;
+  if (!person || amount <= 0){ alert('Please enter the name and amount.'); return; }
+  const date = $('udh-date').value || today(), id = newId();
+  state.udhaar.push({ id, person, amount, kind: udhKind, date, note: $('udh-note').value.trim(), settled: false });
+  state.entries.push({ id: newId(), created: Date.now(), book: 'personal', type: udhKind === 'lent' ? 'out' : 'in', amount, category: udhKind === 'lent' ? 'Loan given' : 'Loan taken', date, mode: 'Cash', person, note: 'Udhaar', udhaarId: id });
+  await save(); $('udh-modal').style.display = 'none'; toast('✅ Udhaar saved'); render();
+};
+async function settleUdhaar(id){
+  const u = state.udhaar.find(x => x.id === id); if (!u) return;
+  if (!confirm((u.kind === 'lent' ? u.person + ' paid you back ' : 'You paid back ' + u.person + ' ') + money(u.amount) + '?\n\nThis adds the return to your Personal money.')) return;
+  u.settled = true; u.settledDate = today();
+  state.entries.push({ id: newId(), created: Date.now(), book: 'personal', type: u.kind === 'lent' ? 'in' : 'out', amount: u.amount, category: u.kind === 'lent' ? 'Loan returned to me' : 'Loan repaid by me', date: today(), mode: 'Cash', person: u.person, note: 'Udhaar settled', udhaarId: id });
+  await save(); toast('✅ Settled'); render();
+}
+async function deleteUdhaar(id){
+  if (!confirm('Delete this Udhaar? (Its money entries stay in your Personal list — delete them there if needed.)')) return;
+  state.udhaar = state.udhaar.filter(x => x.id !== id); await save(); render();
+}
+
+// ---- backup / restore / CSV ----
+function download(name, text, type){
+  const blob = new Blob([text], { type });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  return blob;
+}
+$('menu-btn').onclick = () => {
+  const d = state.lastBackup ? Math.floor((Date.now() - state.lastBackup) / 86400000) : null;
+  $('backup-age').textContent = d === null ? '⚠️ No backup taken yet.' : ('Last backup: ' + (d === 0 ? 'today' : d + ' day(s) ago'));
+  $('menu-modal').style.display = 'flex';
+};
+$('menu-close').onclick = () => $('menu-modal').style.display = 'none';
+$('bk-export').onclick = async () => {
+  const name = 'money-backup-' + fmtDate(today()) + '.json';
+  const text = JSON.stringify({ type: 'money-app-backup', version: 1, exportedAt: new Date().toISOString(), state });
+  const file = new File([text], name, { type: 'application/json' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: 'Money backup' }); } else download(name, text, 'application/json'); }
+  catch (e) { if (!(e && e.name === 'AbortError')) download(name, text, 'application/json'); else return; }
+  state.lastBackup = Date.now(); await save(); $('menu-modal').style.display = 'none'; toast('✅ Backup made — keep it safe');
+};
+$('bk-import').onclick = () => $('bk-file').click();
+$('bk-file').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  let b; try { b = JSON.parse(await f.text()); } catch (err) { alert('That file could not be read.'); return; }
+  if (!b || b.type !== 'money-app-backup' || !b.state){ alert('That is not a Money backup file.'); return; }
+  const n = (b.state.entries || []).length;
+  if (!confirm('Restore this backup (' + n + ' entries)?\n\n⚠️ It REPLACES the money data on this phone.')) return;
+  state = Object.assign({ entries: [], udhaar: [], zakat: { calc: {}, due: null }, lastBackup: 0 }, b.state);
+  await save(); $('menu-modal').style.display = 'none'; toast('✅ Restored ' + n + ' entries'); render();
+};
+$('bk-csv').onclick = () => {
+  const rows = [['Book', 'Date', 'In/Out', 'Amount', 'Category', 'Name', 'Paid by', 'Note']];
+  state.entries.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')).forEach(e => rows.push([BOOKS[e.book] ? BOOKS[e.book].name : e.book, fmtDate(e.date), e.type === 'in' ? 'In' : 'Out', e.amount, e.category || '', e.person || '', e.mode || '', e.note || '']));
+  const csv = '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+  download('money-' + fmtDate(today()) + '.csv', csv, 'text/csv');
+  $('menu-modal').style.display = 'none';
+};
+
+// ---- app lock (PIN kept on this phone only) ----
+function hashPin(pin, salt){ let h1 = 0xdeadbeef, h2 = 0x41c6ce57; const s = salt + ':' + pin + ':money'; for (let r = 0; r < 300; r++) for (let i = 0; i < s.length; i++){ const ch = s.charCodeAt(i) + r; h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); } return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36); }
+function getPin(){ try { return JSON.parse(localStorage.getItem('money-pin') || 'null'); } catch (e) { return null; } }
+$('pin-set').onclick = () => {
+  const p1 = prompt('New PIN (4–8 digits):'); if (!p1) return;
+  if (!/^\d{4,8}$/.test(p1)){ alert('Please use 4 to 8 digits.'); return; }
+  const p2 = prompt('Type the PIN again:'); if (p1 !== p2){ alert('PINs did not match.'); return; }
+  const salt = Math.random().toString(36).slice(2, 10);
+  localStorage.setItem('money-pin', JSON.stringify({ salt, hash: hashPin(p1, salt) }));
+  toast('🔒 PIN set — the app will ask for it when opened');
+};
+$('pin-off').onclick = () => { if (!getPin()) { toast('No PIN set'); return; } if (confirm('Remove the PIN?')) { localStorage.removeItem('money-pin'); toast('PIN removed'); } };
+function lockIfNeeded(){
+  const p = getPin(); if (!p) return;
+  $('lock').style.display = 'flex'; $('lock-pin').value = ''; setTimeout(() => $('lock-pin').focus(), 100);
+}
+$('lock-go').onclick = () => {
+  const p = getPin(); if (!p){ $('lock').style.display = 'none'; return; }
+  if (hashPin($('lock-pin').value, p.salt) === p.hash){ $('lock').style.display = 'none'; $('lock-err').textContent = ''; }
+  else { $('lock-err').textContent = 'Wrong PIN'; $('lock-pin').value = ''; }
+};
+$('lock-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lock-go').onclick(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && getPin()) lockIfNeeded(); });
+
+// ---- install + offline ----
+(function(){
+  const btn = $('install-btn'); let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  btn.onclick = async () => { if (deferred){ deferred.prompt(); try { await deferred.userChoice; } catch (e) {} deferred = null; btn.style.display = 'none'; } };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+
+// ---- start ----
+(async function start(){
+  lockIfNeeded();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+  try { const s = await dbGet('state'); if (s) state = Object.assign(state, s); } catch (e) { alert('⚠️ Could not open the money data on this phone.'); }
+  if (!state.zakat) state.zakat = { calc: {}, due: null };
+  if (!state.zakat.calc) state.zakat.calc = {};
+  book = localStorage.getItem('money-book') || 'personal';
+  if (!BOOKS[book]) book = 'personal';
+  render();
+  if (state.entries.length >= 10 && (!state.lastBackup || Date.now() - state.lastBackup > 30 * 86400000)) setTimeout(() => toast('💾 Tip: take a backup from ⚙️'), 1500);
+})();
+</script>
+</body>
+</html>
