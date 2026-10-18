@@ -1,0 +1,25 @@
+{
+  "id": "./design.html",
+  "name": "Trophy Design",
+  "short_name": "Design",
+  "start_url": "./design.html",
+  "scope": "./design",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [
+    {
+      "src": "design-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "design-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

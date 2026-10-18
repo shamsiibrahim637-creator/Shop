@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Trophy Design</title>
+<link rel="manifest" href="design.webmanifest">
+<link rel="icon" href="design-icon-192.png">
+<link rel="apple-touch-icon" href="design-icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Cinzel:wght@700;900&family=Oswald:wght@700&display=swap" rel="stylesheet">
+<style>
+  :root{ --gold:#f0c341; --gold-2:#b8912f; --bg:#050505; --card:#141414; --line:#2a2a2a; --text:#f2e8cf; --muted:#9a9a9a; --red:#ff3b30; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; -webkit-tap-highlight-color:transparent; }
+  header{ display:flex; align-items:center; gap:8px; padding:10px 14px; position:sticky; top:0; z-index:5; background:rgba(5,5,5,0.96); border-bottom:1px solid var(--line); }
+  header h1{ flex:1; margin:0; font-family:Georgia, serif; color:var(--gold); font-size:19px; white-space:nowrap; }
+  .hbtn{ background:none; border:1.5px solid var(--line); color:#c9c9c9; border-radius:8px; padding:7px 10px; font-weight:800; font-size:13px; text-decoration:none; }
+  .wrap{ max-width:620px; margin:0 auto; padding:12px 14px 60px; }
+  .tabs{ display:flex; gap:6px; margin-bottom:12px; }
+  .tab{ flex:1; padding:11px 4px; border-radius:10px; border:1.5px solid var(--gold-2); background:none; color:var(--gold); font-weight:800; font-size:13px; }
+  .tab.active{ background:var(--gold); color:#000; }
+  .page{ display:none; } .page.active{ display:block; }
+  .card{ background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .card h2{ margin:0 0 10px; font-size:13px; letter-spacing:1px; color:var(--gold); text-transform:uppercase; }
+  label.lb{ display:block; font-size:12px; color:var(--muted); font-weight:700; margin:10px 0 5px; }
+  select, input[type=text], input[type=number], textarea{ width:100%; padding:10px; border-radius:8px; border:1.5px solid #333; background:#0b0b0b; color:#fff; font-size:15px; font-weight:700; font-family:Arial,sans-serif; }
+  textarea{ resize:vertical; }
+  input[type=range]{ width:100%; accent-color:var(--gold); }
+  .chips{ display:flex; flex-wrap:wrap; gap:6px; }
+  .chip{ padding:8px 11px; border-radius:16px; border:1.5px solid #3a3a3a; background:#161616; color:#ddd; font-weight:700; font-size:13px; }
+  .chip.on{ background:var(--gold); color:#000; border-color:var(--gold); }
+  .btn{ border:none; border-radius:10px; padding:12px; font-weight:800; font-size:15px; cursor:pointer; }
+  .btn.gold{ background:var(--gold); color:#000; } .btn.ghost{ background:none; border:1.5px solid #3a3a3a; color:#ddd; }
+  .btn.red{ background:#3a1210; color:#ff8a80; border:1.5px solid #5a2a25; }
+  .btns{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; } .btns .btn{ flex:1; min-width:140px; }
+  .row{ display:flex; gap:8px; } .row > div{ flex:1; min-width:0; }
+  .note{ font-size:12px; color:var(--muted); line-height:1.5; margin-top:8px; }
+  .val{ color:var(--gold); font-weight:800; }
+  #prev-wrap{ background:repeating-conic-gradient(#2a2a2a 0% 25%, #1c1c1c 0% 50%) 50% / 20px 20px; border-radius:12px; padding:10px; text-align:center; min-height:180px; display:flex; align-items:center; justify-content:center; }
+  #prev{ max-width:100%; max-height:62vh; }
+  #status{ font-weight:800; color:var(--gold); font-size:13px; margin:8px 0; min-height:16px; }
+  .sizebox{ font-size:15px; font-weight:800; text-align:center; margin-top:8px; }
+  .lineblk{ border:1.5px solid #2a2a2a; border-radius:10px; padding:10px; margin-top:10px; }
+  .lineblk .ttl{ font-weight:800; font-size:13px; color:var(--gold); }
+  .lib{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+  .lib .it{ background:#0d0d0d; border:1.5px solid #2a2a2a; border-radius:12px; padding:8px; text-align:center; }
+  .lib img{ width:100%; height:130px; object-fit:contain; background:repeating-conic-gradient(#2a2a2a 0% 25%, #1c1c1c 0% 50%) 50% / 14px 14px; border-radius:8px; }
+  .lib .nm{ font-size:13px; font-weight:800; margin:6px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff; padding:11px 16px; border-radius:10px; font-weight:700; font-size:14px; z-index:200; display:none; border:1px solid #444; max-width:90%; text-align:center; }
+  details summary{ cursor:pointer; font-weight:800; color:var(--gold); font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏆 Trophy Design</h1>
+  <a class="hbtn" href="index.html">🏠</a>
+  <button class="hbtn" id="install-btn" style="background:var(--gold); color:#000; border-color:var(--gold);">📲 Add to Home</button>
+</header>
+<div class="wrap">
+  <div class="tabs">
+    <button class="tab active" data-p="pg-prompt">✨ 1. Prompt</button>
+    <button class="tab" data-p="pg-laser">✂️ 2. Laser file</button>
+    <button class="tab" data-p="pg-lib">📚 Saved</button>
+  </div>
+
+  <!-- ================= PROMPT ================= -->
+  <div class="page active" id="pg-prompt">
+    <div class="card">
+      <h2>What design do you need?</h2>
+      <label class="lb">Game / event</label><div class="chips" id="p-sport"></div>
+      <label class="lb">Title on the trophy</label><div class="chips" id="p-title"></div>
+      <input type="text" id="p-title-custom" placeholder="Or type your own title (e.g. BEST FIELDER)" style="margin-top:8px;">
+      <label class="lb">Shape</label><div class="chips" id="p-shape"></div>
+      <label class="lb">Colours</label><div class="chips" id="p-colour"></div>
+      <label class="lb">Add these</label><div class="chips" id="p-extras"></div>
+      <label class="lb">Background</label><div class="chips" id="p-bg"></div>
+      <label class="lb">Anything else? (optional)</label>
+      <input type="text" id="p-custom" placeholder="e.g. add the year 2026, use a lion, tournament name…">
+    </div>
+    <div class="card">
+      <h2>Your ChatGPT prompt</h2>
+      <textarea id="p-out" rows="10" style="font-weight:400; font-size:14px; line-height:1.45;"></textarea>
+      <div class="btns"><button class="btn gold" id="p-copy">📋 Copy prompt</button><a class="btn ghost" href="https://chatgpt.com/" target="_blank" rel="noopener" style="text-align:center; text-decoration:none;">🤖 Open ChatGPT</a></div>
+      <div class="note">Paste it in ChatGPT and download the picture. Then go to <b>✂️ 2. Laser file</b> and open that picture. Tip: keep <b>Plain white</b> background for printing — the shop mockup is only for Instagram.</div>
+    </div>
+  </div>
+
+  <!-- ================= LASER ================= -->
+  <div class="page" id="pg-laser">
+    <div class="card">
+      <h2>1 · Picture</h2>
+      <div class="btns" style="margin-top:0;"><button class="btn gold" id="l-open">🖼 Open design picture</button></div>
+      <input type="file" id="l-file" accept="image/*" style="display:none;">
+      <label class="lb">Remove background</label>
+      <select data-s="removeMode">
+        <option value="auto">Plain white / plain colour background (fast)</option>
+        <option value="ai">Any background — use AI (slower, needs internet)</option>
+        <option value="none">Already see-through (PNG)</option>
+      </select>
+      <div id="tol-box"><label class="lb">Background strength <span class="val" id="v-tol"></span></label><input type="range" min="5" max="120" data-s="tol"></div>
+      <div id="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Preview <span style="color:var(--red); font-size:11px;">— red = laser cut line</span></h2>
+      <div id="prev-wrap"><canvas id="prev"></canvas><div id="prev-empty" class="note">Open a design picture to start.</div></div>
+      <div class="sizebox" id="sizebox"></div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Size & cut line</h2>
+      <div class="row">
+        <div><label class="lb">Size of</label><select data-s="sizeBy"><option value="height">Height</option><option value="width">Width</option></select></div>
+        <div><label class="lb">Inches</label><input type="number" inputmode="decimal" step="0.1" data-s="sizeIn"></div>
+      </div>
+      <label class="lb">Clear gap around design <span class="val" id="v-gap"></span></label><input type="range" min="0" max="8" step="0.5" data-s="gap">
+      <label class="lb">Smooth cut line (fills small notches) <span class="val" id="v-smooth"></span></label><input type="range" min="0" max="10" step="0.5" data-s="smooth">
+      <label class="lb">Gap colour (between design and cut line)</label>
+      <select data-s="edge"><option value="clear">Clear acrylic (no print)</option><option value="white">White</option><option value="black">Black</option><option value="gold">Gold</option></select>
+    </div>
+
+    <div class="card">
+      <h2>4 · Hanging hole</h2>
+      <select data-s="hole"><option value="on">Add a hole</option><option value="off">No hole</option></select>
+      <div id="hole-box">
+        <label class="lb">Hole size <span class="val" id="v-holeD"></span></label><input type="range" min="2" max="12" step="0.5" data-s="holeD">
+        <label class="lb">Left ↔ right <span class="val" id="v-holeX"></span></label><input type="range" min="0" max="100" data-s="holeX">
+        <label class="lb">Up ↕ down <span class="val" id="v-holeY"></span></label><input type="range" min="-15" max="40" data-s="holeY">
+        <div class="note">If the hole is above the design, the cut line adds a small tab for it automatically.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>5 · Name & text (optional)</h2>
+      <div class="note" style="margin-top:0;">ChatGPT often spells names wrong — type them here instead. Leave empty if not needed.</div>
+      <div id="lines"></div>
+    </div>
+
+    <div class="card">
+      <h2>6 · Files for the laser</h2>
+      <div class="btns" style="margin-top:0;"><button class="btn gold" id="x-share">📤 Send all files (WhatsApp…)</button></div>
+      <div class="btns">
+        <button class="btn ghost" id="x-png">🖨 Print picture (PNG)</button>
+        <button class="btn ghost" id="x-svg">✂️ Cut line (SVG)</button>
+        <button class="btn ghost" id="x-dxf">✂️ Cut line (DXF)</button>
+        <button class="btn ghost" id="x-both">🧩 Print + cut (SVG)</button>
+      </div>
+      <label class="lb">Print quality</label>
+      <select data-s="dpi"><option value="300">300 DPI (best)</option><option value="200">200 DPI</option><option value="150">150 DPI (small file)</option></select>
+      <div class="note">• <b>Cut line</b>: red hairline, real size in mm — opens in LightBurn, RDWorks, CorelDraw.<br>• <b>Print picture</b>: same size, see-through outside, hole already cut out.<br>• <b>Print + cut</b>: both in one file, already lined up.</div>
+      <div class="btns"><button class="btn ghost" id="x-save">💾 Save design</button></div>
+    </div>
+
+    <div class="card">
+      <details id="batch">
+        <summary>👥 Many names — make a full sheet</summary>
+        <label class="lb">Names (one per line) — goes into text line 1</label>
+        <textarea id="b-names" rows="6" placeholder="Rahul Sharma&#10;Imran Khan&#10;…"></textarea>
+        <div class="row">
+          <div><label class="lb">Sheet width (mm)</label><input type="number" inputmode="decimal" data-s="bedW"></div>
+          <div><label class="lb">Sheet height (mm)</label><input type="number" inputmode="decimal" data-s="bedH"></div>
+          <div><label class="lb">Space (mm)</label><input type="number" inputmode="decimal" data-s="bedGap"></div>
+        </div>
+        <div class="btns"><button class="btn gold" id="b-go">🧩 Make sheet files</button></div>
+        <div class="note" id="b-info">Pieces are arranged on the sheet automatically. If they don't fit, more sheets are made.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ================= LIBRARY ================= -->
+  <div class="page" id="pg-lib">
+    <div class="card"><h2>Saved designs (on this phone)</h2><div class="lib" id="lib"></div></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function toast(t, ms){ const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', ms || 2400); }
+const status = (t) => { $('status').textContent = t || ''; };
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === t.dataset.p));
+  if (t.dataset.p === 'pg-lib') renderLib();
+  if (t.dataset.p === 'pg-laser') schedule();
+});
+
+// ====================== 1) PROMPT MAKER ======================
+const SPORTS = { 'Cricket': 'golden cricket stumps and a shiny red leather cricket ball', 'Football': 'a shiny football and goal net', 'Kabaddi': 'a kabaddi player silhouette in raid pose', 'Volleyball': 'a volleyball', 'Badminton': 'crossed badminton rackets and a shuttlecock', 'Basketball': 'a basketball and hoop', 'Kho-Kho': 'a kho-kho player running', 'Tennis': 'a tennis racket and ball', 'Chess': 'golden chess king and knight pieces', 'Running': 'a runner silhouette and running track', 'School': 'an open book, graduation cap and star', 'Corporate': 'an elegant star with abstract swooshes' };
+const TITLES = ['MAN OF THE MATCH', 'WINNER', 'RUNNER UP', 'WINNER TEAM', 'RUNNER UP TEAM', 'MAN OF THE SERIES', 'BEST BATSMAN', 'BEST BOWLER', 'BEST PLAYER', 'CHAMPION', 'PARTICIPATION'];
+const SHAPES = { 'Cricket cap': 'a cricket cap seen from the side', 'Shield': 'a shield / crest badge with an angular frame', 'Round medal': 'a round medal with a hanging ring loop at the top', 'Star': 'a big five-point star', 'Trophy cup': 'a trophy cup emblem with a crown on top', 'Banner badge': 'a badge with a wide ribbon banner across the bottom', 'Creative': 'a creative die-cut emblem' };
+const COLOURS = { 'Gold + Black': ['shiny metallic gold with deep black', 'gold'], 'Gold + Blue': ['shiny metallic gold with royal blue', 'gold'], 'Silver + Black': ['polished silver chrome with deep black', 'silver'], 'Bronze': ['bronze / copper metal with dark brown', 'bronze'], 'Gold + Red': ['shiny metallic gold with deep red', 'gold'], 'Gold + Green': ['shiny metallic gold with emerald green', 'gold'], 'All gold': ['full 24k shiny gold with black outlines', 'gold'] };
+const EXTRAS = { 'Crown': 'a golden crown above the text', 'Stars': 'small 3D stars', 'Laurel leaves': 'golden laurel leaves', 'Game items': '__sport', 'Player': 'a golden player silhouette in action', 'Trophy cup': 'a small golden trophy cup', 'Name space': '__space' };
+const BGS = { 'Plain white (for printing)': 'white', 'Shop mockup (for Instagram)': 'mock' };
+const P = Object.assign({ sport: 'Cricket', title: 'MAN OF THE MATCH', shape: 'Cricket cap', colour: 'Gold + Black', extras: ['Crown', 'Stars', 'Game items'], bg: 'Plain white (for printing)' }, JSON.parse(localStorage.getItem('design-prompt') || '{}'));
+function chips(el, list, isOn, onTap){
+  $(el).innerHTML = list.map(k => `<button type="button" class="chip ${isOn(k) ? 'on' : ''}">${k}</button>`).join('');
+  $(el).querySelectorAll('.chip').forEach((b, i) => b.onclick = () => { onTap(list[i]); renderPrompt(); });
+}
+function renderPrompt(){
+  chips('p-sport', Object.keys(SPORTS), k => k === P.sport, k => P.sport = k);
+  chips('p-title', TITLES, k => k === P.title && !$('p-title-custom').value.trim(), k => { P.title = k; $('p-title-custom').value = ''; });
+  chips('p-shape', Object.keys(SHAPES), k => k === P.shape, k => P.shape = k);
+  chips('p-colour', Object.keys(COLOURS), k => k === P.colour, k => P.colour = k);
+  chips('p-extras', Object.keys(EXTRAS), k => P.extras.includes(k), k => { P.extras = P.extras.includes(k) ? P.extras.filter(x => x !== k) : P.extras.concat(k); });
+  chips('p-bg', Object.keys(BGS), k => k === P.bg, k => P.bg = k);
+  localStorage.setItem('design-prompt', JSON.stringify(P));
+  $('p-out').value = buildPrompt();
+}
+function buildPrompt(){
+  const title = ($('p-title-custom').value.trim() || P.title).toUpperCase();
+  const [colour, rim] = COLOURS[P.colour];
+  const items = P.extras.filter(k => !EXTRAS[k].startsWith('__')).map(k => EXTRAS[k]);
+  if (P.extras.includes('Game items')) items.unshift(SPORTS[P.sport]);
+  const space = P.extras.includes('Name space');
+  const mock = BGS[P.bg] === 'mock';
+  const custom = $('p-custom').value.trim();
+  return [
+    `Design a premium 3D "${title}" award emblem for an acrylic trophy, ${P.sport} theme.`,
+    `Shape: ${SHAPES[P.shape]} — ONE single solid die-cut shape with a smooth, bold outer edge (no thin spikes, no loose or floating parts) so it can be laser cut.`,
+    `Main text: "${title}" — spell it exactly like this, in big bold 3D metallic letters, easy to read.`,
+    items.length ? `Include: ${items.join(', ')}.` : '',
+    `Colours: ${colour}, glossy metallic finish with sparkle highlights, and a thick ${rim} border around the whole shape.`,
+    space ? 'Leave a clean empty band at the bottom (no text in it) — I will add the player name there later.' : '',
+    custom ? `Also: ${custom}.` : '',
+    mock ? 'Show it as a real clear acrylic trophy standing on a glossy black marble table with warm golden bokeh lights behind, front view, photo-realistic.'
+         : 'Background: pure plain white (#FFFFFF) — no shadow, no reflection, no floor, no table. Front view, centred, with white space all around the design.',
+    'Very high resolution, sharp details, ultra-realistic 3D render, square image.'
+  ].filter(Boolean).join('\n');
+}
+$('p-title-custom').oninput = renderPrompt; $('p-custom').oninput = renderPrompt;
+$('p-copy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('p-out').value); toast('✅ Copied — paste it in ChatGPT'); }
+  catch (e) { $('p-out').select(); document.execCommand('copy'); toast('✅ Copied'); }
+};
+renderPrompt();
+
+// ====================== 2) LASER FILE ======================
+const DEF = { removeMode: 'auto', tol: 40, sizeBy: 'height', sizeIn: 6, gap: 1.5, smooth: 2, edge: 'clear', hole: 'on', holeD: 5, holeX: 50, holeY: -4, dpi: '300', bedW: 600, bedH: 400, bedGap: 4,
+  lines: [ { text: '', font: 'Anton', style: 'gold', size: 9, x: 50, y: 104, plate: true }, { text: '', font: 'Oswald', style: 'gold', size: 5.5, x: 50, y: 116, plate: true }, { text: '', font: 'Oswald', style: 'gold', size: 4.5, x: 50, y: 126, plate: false } ] };
+let S = JSON.parse(JSON.stringify(DEF));
+try { const saved = JSON.parse(localStorage.getItem('design-laser') || 'null'); if (saved) S = Object.assign(S, saved, { lines: (saved.lines || DEF.lines).map((l, i) => Object.assign({}, DEF.lines[i], l)) }); } catch (e) {}
+const FONTS = { Anton: 'Anton', Cinzel: 'Cinzel', Oswald: 'Oswald', Arial: 'Arial Black' };
+const STYLES = { gold: 'Gold', silver: 'Silver', white: 'White', black: 'Black' };
+
+function linesUi(){
+  $('lines').innerHTML = S.lines.map((L, i) => `<div class="lineblk"><div class="ttl">Text line ${i + 1}${i === 0 ? ' (player name)' : i === 1 ? ' (event / tournament)' : ' (year / shop name)'}</div>
+    <input type="text" data-l="${i}.text" value="${String(L.text).replace(/"/g, '&quot;')}" placeholder="${i === 0 ? 'e.g. RAHUL SHARMA' : i === 1 ? 'e.g. TPL CRICKET CUP' : 'e.g. 2026'}" style="margin-top:6px;">
+    <div class="row"><div><label class="lb">Font</label><select data-l="${i}.font">${Object.keys(FONTS).map(f => `<option ${f === L.font ? 'selected' : ''}>${f}</option>`).join('')}</select></div>
+      <div><label class="lb">Colour</label><select data-l="${i}.style">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === L.style ? 'selected' : ''}>${v}</option>`).join('')}</select></div></div>
+    <label class="lb">Size <span class="val">${L.size}</span></label><input type="range" min="2" max="20" step="0.5" data-l="${i}.size" value="${L.size}">
+    <label class="lb">Up ↕ down <span class="val">${L.y}</span></label><input type="range" min="-20" max="130" data-l="${i}.y" value="${L.y}">
+    <label class="lb">Left ↔ right <span class="val">${L.x}</span></label><input type="range" min="0" max="100" data-l="${i}.x" value="${L.x}">
+    <label style="display:flex; gap:8px; align-items:center; margin-top:8px; font-weight:700; font-size:13px;"><input type="checkbox" data-l="${i}.plate" ${L.plate ? 'checked' : ''} style="width:20px; height:20px;"> Dark name plate behind this text</label></div>`).join('');
+  $('lines').querySelectorAll('[data-l]').forEach(el => {
+    const ev = el.type === 'text' ? 'input' : 'input';
+    el.addEventListener(ev, () => {
+      const [i, k] = el.dataset.l.split('.');
+      S.lines[i][k] = el.type === 'checkbox' ? el.checked : (el.type === 'range' ? parseFloat(el.value) : el.value);
+      if (el.type === 'range') el.previousElementSibling.querySelector('.val').textContent = el.value;
+      changed(false);
+    });
+    if (el.tagName === 'SELECT' || el.type === 'checkbox') el.addEventListener('change', () => el.dispatchEvent(new Event('input')));
+  });
+}
+function bindSettings(){
+  document.querySelectorAll('[data-s]').forEach(el => {
+    const k = el.dataset.s; el.value = S[k];
+    const h = () => { S[k] = (el.type === 'range' || el.type === 'number') ? (parseFloat(el.value) || 0) : el.value; showVals(); changed(k === 'removeMode' || k === 'tol'); };
+    el.addEventListener('input', h); el.addEventListener('change', h);
+  });
+  showVals();
+}
+function showVals(){
+  $('v-tol').textContent = S.tol; $('v-gap').textContent = S.gap + ' mm'; $('v-smooth').textContent = S.smooth + ' mm';
+  $('v-holeD').textContent = S.holeD + ' mm'; $('v-holeX').textContent = S.holeX; $('v-holeY').textContent = S.holeY;
+  $('tol-box').style.display = S.removeMode === 'auto' ? '' : 'none';
+  $('hole-box').style.display = S.hole === 'on' ? '' : 'none';
+}
+let maskDirty = true;
+function changed(needMask){ if (needMask) maskDirty = true; localStorage.setItem('design-laser', JSON.stringify(S)); schedule(); }
+let tmr = null; function schedule(){ clearTimeout(tmr); tmr = setTimeout(() => update().catch(e => { console.error(e); status('⚠️ ' + (e.message || e)); }), 220); }
+
+// ---------- picture + background removal ----------
+let SRC = null;          // { canvas, blob, name }
+let ART = null;          // { art: canvas (cropped, see-through outside), sil: canvas (solid silhouette), bw, bh }
+$('l-open').onclick = () => $('l-file').click();
+$('l-file').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await loadPicture(f, f.name.replace(/\.[^.]+$/, '')); };
+function loadImg(src){ return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('Could not open this picture')); im.src = src; }); }
+async function loadPicture(blob, name){
+  const url = URL.createObjectURL(blob);
+  const im = await loadImg(url);
+  const m = Math.min(1, 2400 / Math.max(im.naturalWidth, im.naturalHeight));
+  const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * m); c.height = Math.round(im.naturalHeight * m);
+  c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+  URL.revokeObjectURL(url);
+  SRC = { canvas: c, blob, name: name || 'design', aiMask: null };
+  // a see-through PNG? choose "none" automatically
+  const d = c.getContext('2d').getImageData(0, 0, c.width, 1).data; let clear = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 20) clear++;
+  if (clear > c.width * 0.5 && S.removeMode === 'auto'){ S.removeMode = 'none'; document.querySelector('[data-s=removeMode]').value = 'none'; showVals(); }
+  maskDirty = true; $('prev-empty').style.display = 'none';
+  await update();
+}
+
+function bgMaskAuto(c, tol){
+  const w = c.width, h = c.height, d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  // background colour = average of the 4 corners
+  let r = 0, g = 0, b = 0, n = 0;
+  for (const [cx, cy] of [[0, 0], [w - 6, 0], [0, h - 6], [w - 6, h - 6]]) for (let y = cy; y < cy + 6; y++) for (let x = cx; x < cx + 6; x++){ const i = (y * w + x) * 4; r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+  r /= n; g /= n; b /= n;
+  const isBg = (p) => { const i = p * 4; if (d[i + 3] < 30) return true; return Math.abs(d[i] - r) <= tol && Math.abs(d[i + 1] - g) <= tol && Math.abs(d[i + 2] - b) <= tol; };
+  const bg = new Uint8Array(w * h), q = new Int32Array(w * h); let qh = 0, qt = 0;
+  const push = (p) => { if (!bg[p] && isBg(p)){ bg[p] = 1; q[qt++] = p; } };
+  for (let x = 0; x < w; x++){ push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++){ push(y * w); push(y * w + w - 1); }
+  while (qh < qt){ const p = q[qh++], x = p % w; if (x > 0) push(p - 1); if (x < w - 1) push(p + 1); if (p >= w) push(p - w); if (p < w * (h - 1)) push(p + w); }
+  const m = new Uint8Array(w * h); for (let i = 0; i < m.length; i++) m[i] = bg[i] ? 0 : 1;
+  return m;
+}
+function alphaMask(c){ const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, m = new Uint8Array(c.width * c.height); for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 100 ? 1 : 0; return m; }
+// keep the big parts, drop dust; then fill every hole inside
+function cleanMask(m, w, h){
+  const lab = new Int32Array(w * h), q = new Int32Array(w * h), sizes = [0]; let id = 0;
+  for (let s = 0; s < m.length; s++){
+    if (!m[s] || lab[s]) continue; id++; let qh = 0, qt = 0; q[qt++] = s; lab[s] = id; let cnt = 0;
+    while (qh < qt){ const p = q[qh++]; cnt++; const x = p % w;
+      for (const nb of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, p - w, p + w]) if (nb >= 0 && nb < m.length && m[nb] && !lab[nb]){ lab[nb] = id; q[qt++] = nb; } }
+    sizes.push(cnt);
+  }
+  const big = Math.max(0, ...sizes), out = new Uint8Array(w * h);
+  for (let i = 0; i < m.length; i++) if (lab[i] && sizes[lab[i]] >= big * 0.03) out[i] = 1;
+  return fillHoles(out, w, h);
+}
+function fillHoles(m, w, h){
+  const out = new Uint8Array(w * h), q = new Int32Array(w * h); let qh = 0, qt = 0;
+  const push = (p) => { if (!m[p] && !out[p]){ out[p] = 1; q[qt++] = p; } };   // out = outside
+  for (let x = 0; x < w; x++){ push(x); push((h - 1) * w + x); } for (let y = 0; y < h; y++){ push(y * w); push(y * w + w - 1); }
+  while (qh < qt){ const p = q[qh++], x = p % w; if (x > 0) push(p - 1); if (x < w - 1) push(p + 1); if (p >= w) push(p - w); if (p < w * (h - 1)) push(p + w); }
+  for (let i = 0; i < out.length; i++) out[i] = out[i] ? 0 : 1;
+  return out;
+}
+// AI background removal (same library as Combo Maker)
+const SMART_BG_LIBS = ['https://esm.sh/@imgly/background-removal@1.7.0?deps=onnxruntime-web@1.21.0', 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm', 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/+esm'];
+async function loadSmartBgLib(){ let last = null; for (const u of SMART_BG_LIBS){ try { const lib = await import(u); const fn = lib.removeBackground || (lib.default && lib.default.removeBackground) || lib.default; if (typeof fn === 'function') return fn; } catch (e) { last = e; } } throw last || new Error('AI not available'); }
+async function aiMask(){
+  if (SRC.aiMask) return SRC.aiMask;
+  status('⏳ Loading the AI… (first time takes a minute)');
+  if (!window.__bgLib) window.__bgLib = loadSmartBgLib();
+  let fn; try { fn = await window.__bgLib; } catch (e) { window.__bgLib = null; throw new Error('Could not load the AI — check internet, or use "Plain white" mode'); }
+  const src = await new Promise(r => SRC.canvas.toBlob(r, 'image/png'));
+  let out = null, last = null;
+  for (const o of [{ device: 'cpu', model: 'isnet_quint8' }, {}]){ try { out = await fn(src, Object.assign({ output: { format: 'image/png' }, progress: (k, c, t) => { if (t) status('⏳ Downloading AI… ' + Math.round(c / t * 100) + '%'); } }, o)); if (out) break; } catch (e) { last = e; } }
+  if (!out) throw last || new Error('AI failed');
+  status('⏳ Removing background…');
+  const im = await loadImg(URL.createObjectURL(out));
+  const c = document.createElement('canvas'); c.width = SRC.canvas.width; c.height = SRC.canvas.height; c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+  SRC.aiMask = alphaMask(c);
+  return SRC.aiMask;
+}
+async function makeArt(){
+  const c = SRC.canvas, w = c.width, h = c.height;
+  let m = S.removeMode === 'none' ? alphaMask(c) : S.removeMode === 'ai' ? await aiMask() : bgMaskAuto(c, S.tol);
+  m = cleanMask(m, w, h);
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x]){ if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) throw new Error('No design found — try "Background strength" lower, or AI mode');
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const sil = document.createElement('canvas'); sil.width = bw; sil.height = bh;
+  const sx = sil.getContext('2d'), id = sx.createImageData(bw, bh);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) if (m[(y + y0) * w + x + x0]){ const i = (y * bw + x) * 4; id.data[i] = id.data[i + 1] = id.data[i + 2] = 255; id.data[i + 3] = 255; }
+  sx.putImageData(id, 0, 0);
+  const art = document.createElement('canvas'); art.width = bw; art.height = bh;
+  const ax = art.getContext('2d'); ax.drawImage(c, -x0, -y0);
+  ax.globalCompositeOperation = 'destination-in'; ax.filter = 'blur(0.6px)'; ax.drawImage(sil, 0, 0); ax.filter = 'none'; ax.globalCompositeOperation = 'source-over';
+  ART = { art, sil, bw, bh };
+}
+
+// ---------- text ----------
+function textFill(ctx, style, y, fs){
+  if (style === 'white') return '#ffffff'; if (style === 'black') return '#111111';
+  const g = ctx.createLinearGradient(0, y - fs / 2, 0, y + fs / 2);
+  const st = style === 'silver' ? ['#ffffff', '#e2e2e2', '#8d8d8d', '#f4f4f4'] : ['#fff6c2', '#f3c64a', '#a8741a', '#ffe08a'];
+  st.forEach((c, i) => g.addColorStop(i / 3, c)); return g;
+}
+function drawLines(ctx, geo, lines, forMask){
+  lines.forEach(L => {
+    const txt = String(L.text || '').trim(); if (!txt) return;
+    let fs = geo.bw * L.size / 100;
+    ctx.font = `900 ${fs}px "${FONTS[L.font] || 'Arial Black'}", Arial, sans-serif`;
+    let tw = ctx.measureText(txt).width; const maxW = geo.bw * 0.9 * (L.plate ? 0.86 : 1);
+    if (tw > maxW){ fs *= maxW / tw; ctx.font = `900 ${fs}px "${FONTS[L.font] || 'Arial Black'}", Arial, sans-serif`; tw = ctx.measureText(txt).width; }
+    const x = geo.ox + geo.bw * L.x / 100, y = geo.oy + geo.bh * L.y / 100;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (L.plate){
+      const pw = tw + fs * 1.1, ph = fs * 1.45, r = ph * 0.32;
+      ctx.beginPath(); ctx.roundRect(x - pw / 2, y - ph / 2, pw, ph, r);
+      if (forMask){ ctx.fillStyle = '#fff'; ctx.fill(); }
+      else { const g = ctx.createLinearGradient(0, y - ph / 2, 0, y + ph / 2); g.addColorStop(0, '#2a2a2a'); g.addColorStop(1, '#050505'); ctx.fillStyle = g; ctx.fill(); ctx.lineWidth = fs * 0.09; ctx.strokeStyle = L.style === 'silver' ? '#d0d0d0' : '#e2b13c'; ctx.stroke(); }
+    }
+    ctx.lineJoin = 'round';
+    if (forMask){ ctx.lineWidth = fs * 0.16; ctx.strokeStyle = '#fff'; ctx.strokeText(txt, x, y); ctx.fillStyle = '#fff'; ctx.fillText(txt, x, y); return; }
+    ctx.lineWidth = fs * 0.16; ctx.strokeStyle = L.style === 'black' ? '#e2b13c' : '#1a1000'; ctx.strokeText(txt, x, y);
+    ctx.fillStyle = textFill(ctx, L.style, y, fs); ctx.fillText(txt, x, y);
+  });
+}
+async function fontsReady(lines){ try { await Promise.all(lines.filter(l => String(l.text || '').trim()).map(l => document.fonts.load(`900 40px "${FONTS[l.font]}"`))); } catch (e) {} }
+
+// ---------- distance transform (for the clear gap around the design) ----------
+const INF = 1e20;
+function edt1d(f, n, d, v, z){
+  let k = 0; v[0] = 0; z[0] = -INF; z[1] = INF;
+  for (let q = 1; q < n; q++){
+    let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+    while (s <= z[k]){ k--; s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+    k++; v[k] = q; z[k] = s; z[k + 1] = INF;
+  }
+  k = 0; for (let q = 0; q < n; q++){ while (z[k + 1] < q) k++; d[q] = (q - v[k]) * (q - v[k]) + f[v[k]]; }
+}
+function edt(inside, w, h){ // squared distance to nearest "inside" pixel
+  const g = new Float64Array(w * h); for (let i = 0; i < g.length; i++) g[i] = inside[i] ? 0 : INF;
+  const n = Math.max(w, h), f = new Float64Array(n), d = new Float64Array(n), v = new Int32Array(n), z = new Float64Array(n + 1);
+  for (let x = 0; x < w; x++){ for (let y = 0; y < h; y++) f[y] = g[y * w + x]; edt1d(f, h, d, v, z); for (let y = 0; y < h; y++) g[y * w + x] = d[y]; }
+  for (let y = 0; y < h; y++){ for (let x = 0; x < w; x++) f[x] = g[y * w + x]; edt1d(f, w, d, v, z); for (let x = 0; x < w; x++) g[y * w + x] = d[x]; }
+  return g;
+}
+// ---------- marching squares → smooth closed outlines ----------
+function contours(field, w, h, t){
+  const pts = new Map(), adj = new Map();
+  const key = (type, x, y) => 2 * (y * (w + 1) + x) + type;   // type 0 = horizontal edge, 1 = vertical edge
+  const pt = (k, x, y) => { if (!pts.has(k)) pts.set(k, [x, y]); };
+  const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+  const F = (x, y) => field[y * w + x];
+  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++){
+    const a = F(x, y), b = F(x + 1, y), c = F(x + 1, y + 1), d = F(x, y + 1);
+    const ci = (a > t ? 8 : 0) | (b > t ? 4 : 0) | (c > t ? 2 : 0) | (d > t ? 1 : 0);
+    if (ci === 0 || ci === 15) continue;
+    const E = {
+      T: () => { const k = key(0, x, y); pt(k, x + (t - a) / (b - a), y); return k; },
+      B: () => { const k = key(0, x, y + 1); pt(k, x + (t - d) / (c - d), y + 1); return k; },
+      L: () => { const k = key(1, x, y); pt(k, x, y + (t - a) / (d - a)); return k; },
+      R: () => { const k = key(1, x + 1, y); pt(k, x + 1, y + (t - b) / (c - b)); return k; }
+    };
+    const S2 = { 1: ['LB'], 2: ['BR'], 3: ['LR'], 4: ['TR'], 5: ['TR', 'LB'], 6: ['TB'], 7: ['TL'], 8: ['TL'], 9: ['TB'], 10: ['TL', 'BR'], 11: ['TR'], 12: ['LR'], 13: ['RB'], 14: ['LB'] }[ci];
+    S2.forEach(s => link(E[s[0]](), E[s[1]]()));
+  }
+  const used = new Set(), loops = [];
+  for (const start of adj.keys()){
+    if (used.has(start)) continue;
+    const loop = []; let prev = null, cur = start;
+    while (cur != null && !used.has(cur)){ used.add(cur); loop.push(pts.get(cur)); const nb = adj.get(cur) || []; const nx = nb.find(n => n !== prev && !used.has(n)); prev = cur; cur = nx; }
+    if (loop.length > 8) loops.push(loop);
+  }
+  return loops;
+}
+function rdp(pts, eps){
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length){
+    const [s, e] = stack.pop(); let md = 0, mi = -1; const [x1, y1] = pts[s], [x2, y2] = pts[e]; const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1e-9;
+    for (let i = s + 1; i < e; i++){ const dd = Math.abs(dy * pts[i][0] - dx * pts[i][1] + x2 * y1 - y2 * x1) / L; if (dd > md){ md = dd; mi = i; } }
+    if (md > eps){ keep[mi] = 1; stack.push([s, mi], [mi, e]); }
+  }
+  return pts.filter((p, i) => keep[i]);
+}
+function smoothLoop(l, passes){ // soften the tiny pixel steps
+  let a = l; const n = l.length;
+  for (let p = 0; p < passes * 2; p++){ const b = new Array(n); for (let i = 0; i < n; i++){ const q = a[(i - 1 + n) % n], c = a[i], r = a[(i + 1) % n]; b[i] = [(q[0] + 2 * c[0] + r[0]) / 4, (q[1] + 2 * c[1] + r[1]) / 4]; } a = b; }
+  return a;
+}
+function rdpClosed(l, eps){
+  let far = 0, fd = -1; for (let i = 1; i < l.length; i++){ const d = Math.hypot(l[i][0] - l[0][0], l[i][1] - l[0][1]); if (d > fd){ fd = d; far = i; } }
+  const a = rdp(l.slice(0, far + 1), eps), b = rdp(l.slice(far).concat([l[0]]), eps);
+  return a.concat(b.slice(1, -1));
+}
+function polyArea(p){ let a = 0; for (let i = 0; i < p.length; i++){ const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length]; a += x1 * y2 - x2 * y1; } return Math.abs(a / 2); }
+
+// ---------- build one piece ----------
+// returns { comp, pxmm, loops (mm, origin = top-left of piece), hole {x,y,r} mm, W, H (mm), offPx }
+function buildPiece(lines, pxmmIn){
+  const { bw, bh } = ART;
+  const sizeMm = Math.max(10, S.sizeIn * 25.4);
+  let pxmm = pxmmIn || ((S.sizeBy === 'height' ? bh : bw) / Math.max(5, sizeMm - 2 * S.gap));
+  const pad = Math.ceil((S.gap + S.smooth + S.holeD + 6) * pxmm + 0.3 * Math.max(bw, bh));
+  const W = bw + 2 * pad, H = bh + 2 * pad, geo = { ox: pad, oy: pad, bw, bh };
+  // full-colour picture
+  const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
+  const cx = comp.getContext('2d'); cx.drawImage(ART.art, pad, pad); drawLines(cx, geo, lines, false);
+  // shape used for the cut line
+  const k = Math.max(1, Math.max(W, H) / 1100), ww = Math.ceil(W / k), wh = Math.ceil(H / k);
+  const mc = document.createElement('canvas'); mc.width = ww; mc.height = wh;
+  const mx = mc.getContext('2d'); mx.scale(1 / k, 1 / k); mx.drawImage(ART.sil, pad, pad); drawLines(mx, geo, lines, true);
+  const hole = S.hole === 'on' ? { x: pad + bw * S.holeX / 100, y: pad + bh * S.holeY / 100, r: S.holeD / 2 * pxmm } : null;
+  if (hole){ mx.beginPath(); mx.arc(hole.x, hole.y, hole.r + 3 * pxmm, 0, Math.PI * 2); mx.fillStyle = '#fff'; mx.fill(); }
+  const md = mx.getImageData(0, 0, ww, wh).data, inside = new Uint8Array(ww * wh);
+  for (let i = 0; i < inside.length; i++) inside[i] = md[i * 4 + 3] > 90 ? 1 : 0;
+  const R1 = (S.gap + S.smooth) * pxmm / k, Rs = S.smooth * pxmm / k;
+  const d1 = edt(inside, ww, wh), dil = new Uint8Array(ww * wh);
+  for (let i = 0; i < dil.length; i++) dil[i] = d1[i] <= R1 * R1 ? 1 : 0;
+  let fin = dil;
+  if (Rs > 0.5){ const out = new Uint8Array(ww * wh); for (let i = 0; i < out.length; i++) out[i] = dil[i] ? 0 : 1; const d2 = edt(out, ww, wh); fin = new Uint8Array(ww * wh); for (let i = 0; i < fin.length; i++) fin[i] = d2[i] > Rs * Rs ? 1 : 0; }
+  fin = fillHoles(fin, ww, wh);
+  const field = new Float32Array(ww * wh);
+  for (let y = 1; y < wh - 1; y++) for (let x = 1; x < ww - 1; x++){ let s = 0; for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) s += fin[(y + j) * ww + x + i]; field[y * ww + x] = s / 9; }
+  let loops = contours(field, ww, wh, 0.5).map(l => l.map(([x, y]) => [x * k / pxmm, y * k / pxmm]));
+  loops = loops.filter(l => polyArea(l) > 4).map(l => rdpClosed(smoothLoop(l, 3), 0.05));
+  if (!loops.length) throw new Error('Could not make the cut line');
+  let x0 = INF, y0 = INF, x1 = -INF, y1 = -INF;
+  loops.forEach(l => l.forEach(([x, y]) => { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }));
+  loops = loops.map(l => l.map(([x, y]) => [x - x0, y - y0]));
+  return { comp, pxmm, loops, W: x1 - x0, H: y1 - y0, off: [x0, y0], hole: hole ? { x: hole.x / pxmm - x0, y: hole.y / pxmm - y0, r: S.holeD / 2 } : null };
+}
+function buildFinal(lines){
+  // the size you type is for the finished acrylic piece → correct once
+  let p = buildPiece(lines);
+  const want = Math.max(10, S.sizeIn * 25.4), got = S.sizeBy === 'height' ? p.H : p.W;
+  if (Math.abs(got - want) > 0.3) p = buildPiece(lines, p.pxmm * got / want);
+  return p;
+}
+// ---------- drawing the piece ----------
+function piecePath(ctx, p, s, ox, oy){ ctx.beginPath(); p.loops.forEach(l => { l.forEach(([x, y], i) => i ? ctx.lineTo(ox + x * s, oy + y * s) : ctx.moveTo(ox + x * s, oy + y * s)); ctx.closePath(); }); }
+const EDGE = { white: '#ffffff', black: '#0a0a0a', gold: '#d9a933' };
+function renderPiece(p, s){ // s = pixels per mm
+  const c = document.createElement('canvas'); c.width = Math.ceil(p.W * s); c.height = Math.ceil(p.H * s);
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  piecePath(x, p, s, 0, 0);
+  if (EDGE[S.edge]){ x.fillStyle = EDGE[S.edge]; x.fill(); }
+  x.save(); x.clip();
+  x.drawImage(p.comp, -p.off[0] * s, -p.off[1] * s, p.comp.width / p.pxmm * s, p.comp.height / p.pxmm * s);
+  x.restore();
+  if (p.hole){ x.globalCompositeOperation = 'destination-out'; x.beginPath(); x.arc(p.hole.x * s, p.hole.y * s, p.hole.r * s, 0, Math.PI * 2); x.fill(); x.globalCompositeOperation = 'source-over'; }
+  return c;
+}
+
+let PIECE = null;
+async function update(){
+  if (!SRC) return;
+  if (maskDirty || !ART){ status('⏳ Finding the design…'); await new Promise(r => setTimeout(r, 30)); await makeArt(); maskDirty = false; }
+  await fontsReady(S.lines);
+  status('⏳ Making cut line…'); await new Promise(r => setTimeout(r, 10));
+  PIECE = buildFinal(S.lines);
+  // preview
+  const pv = $('prev'), s = Math.min(900 / PIECE.W, 900 / PIECE.H), m = 10;
+  pv.width = Math.ceil(PIECE.W * s) + 2 * m; pv.height = Math.ceil(PIECE.H * s) + 2 * m;
+  const x = pv.getContext('2d'); x.clearRect(0, 0, pv.width, pv.height);
+  x.drawImage(renderPiece(PIECE, s), m, m);
+  piecePath(x, PIECE, s, m, m); x.strokeStyle = '#ff2d2d'; x.lineWidth = 2; x.stroke();
+  if (PIECE.hole){ x.beginPath(); x.arc(m + PIECE.hole.x * s, m + PIECE.hole.y * s, PIECE.hole.r * s, 0, Math.PI * 2); x.stroke(); }
+  const inch = (mm) => (mm / 25.4).toFixed(2);
+  $('sizebox').innerHTML = `Finished piece: <span class="val">${inch(PIECE.W)}" × ${inch(PIECE.H)}"</span> <span style="color:var(--muted); font-size:13px;">(${PIECE.W.toFixed(1)} × ${PIECE.H.toFixed(1)} mm)</span>`;
+  status('');
+}
+
+// ---------- files ----------
+const f3 = (n) => (Math.round(n * 1000) / 1000).toString();
+function pathD(p, ox, oy){ return p.loops.map(l => 'M' + l.map(([x, y]) => f3(ox + x) + ' ' + f3(oy + y)).join(' L') + ' Z').join(' '); }
+function cutSvgItems(p, ox, oy){
+  let s = `<path d="${pathD(p, ox, oy)}" fill="none" stroke="#FF0000" stroke-width="0.05"/>`;
+  if (p.hole) s += `<circle cx="${f3(ox + p.hole.x)}" cy="${f3(oy + p.hole.y)}" r="${f3(p.hole.r)}" fill="none" stroke="#FF0000" stroke-width="0.05"/>`;
+  return s;
+}
+function svgDoc(W, H, body){ return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${f3(W)}mm" height="${f3(H)}mm" viewBox="0 0 ${f3(W)} ${f3(H)}">\n${body}\n</svg>`; }
+function dxfDoc(items, H){ // items: [{p, ox, oy}]
+  const L = ['0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES'];
+  items.forEach(({ p, ox, oy }) => {
+    p.loops.forEach(l => { L.push('0', 'POLYLINE', '8', 'CUT', '62', '1', '66', '1', '70', '1', '10', '0', '20', '0', '30', '0'); l.forEach(([x, y]) => L.push('0', 'VERTEX', '8', 'CUT', '10', f3(ox + x), '20', f3(H - (oy + y)), '30', '0')); L.push('0', 'SEQEND', '8', 'CUT'); });
+    if (p.hole) L.push('0', 'CIRCLE', '8', 'CUT', '62', '1', '10', f3(ox + p.hole.x), '20', f3(H - (oy + p.hole.y)), '30', '0', '40', f3(p.hole.r));
+  });
+  L.push('0', 'ENDSEC', '0', 'EOF'); return L.join('\n');
+}
+const dpmm = () => Number(S.dpi) / 25.4;
+function canvasBlob(c){ return new Promise(r => c.toBlob(r, 'image/png')); }
+function blobDataUrl(b){ return new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); }); }
+function fileBase(noName){ const n = noName ? '' : (S.lines[0].text || '').trim(); return ((SRC ? SRC.name : 'design') + (n ? '-' + n : '')).replace(/[^\w\-]+/g, '-').slice(0, 50); }
+async function pngWithDpi(blob, dpi){ // write the print size into the PNG (pHYs) so print software opens it at the right size
+  const buf = new Uint8Array(await blob.arrayBuffer()); const ppm = Math.round(dpi / 0.0254);
+  const chunk = new Uint8Array(21); const dv = new DataView(chunk.buffer);
+  dv.setUint32(0, 9); chunk.set([112, 72, 89, 115], 4); dv.setUint32(8, ppm); dv.setUint32(12, ppm); chunk[16] = 1;
+  let c = ~0; for (let i = 4; i < 17; i++){ c ^= chunk[i]; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1)); } dv.setUint32(17, ~c >>> 0);
+  const out = new Uint8Array(buf.length + 21); out.set(buf.slice(0, 33)); out.set(chunk, 33); out.set(buf.slice(33), 54);
+  return new Blob([out], { type: 'image/png' });
+}
+async function makeFiles(which){
+  if (!PIECE){ alert('Open a design picture first.'); return []; }
+  status('⏳ Making files…'); await new Promise(r => setTimeout(r, 20));
+  const base = fileBase(), out = [];
+  let png = null;
+  if (which.includes('png') || which.includes('both')) png = await pngWithDpi(await canvasBlob(renderPiece(PIECE, dpmm())), Number(S.dpi));
+  if (which.includes('png')) out.push(new File([png], base + '-PRINT.png', { type: 'image/png' }));
+  if (which.includes('svg')) out.push(new File([svgDoc(PIECE.W, PIECE.H, cutSvgItems(PIECE, 0, 0))], base + '-CUT.svg', { type: 'image/svg+xml' }));
+  if (which.includes('dxf')) out.push(new File([dxfDoc([{ p: PIECE, ox: 0, oy: 0 }], PIECE.H)], base + '-CUT.dxf', { type: 'application/dxf' }));
+  if (which.includes('both')){ const du = await blobDataUrl(png); out.push(new File([svgDoc(PIECE.W, PIECE.H, `<image x="0" y="0" width="${f3(PIECE.W)}" height="${f3(PIECE.H)}" xlink:href="${du}" href="${du}" preserveAspectRatio="none"/>\n` + cutSvgItems(PIECE, 0, 0))], base + '-PRINT+CUT.svg', { type: 'image/svg+xml' })); }
+  status('');
+  return out;
+}
+function download(file){ const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); }
+async function shareOrDownload(files){
+  if (!files.length) return;
+  const shareable = files.filter(f => navigator.canShare && navigator.canShare({ files: [f] }));
+  const rest = files.filter(f => !shareable.includes(f));
+  if (shareable.length){
+    try { await navigator.share({ files: shareable, title: 'Trophy laser files' }); }
+    catch (e) { if (e && e.name === 'AbortError') return; shareable.forEach(download); }
+  }
+  rest.forEach(download);
+  if (rest.length) toast('⬇ ' + rest.map(f => f.name.split('-').pop()).join(', ') + ' saved to Downloads', 4000);
+}
+$('x-png').onclick = async () => (await makeFiles(['png'])).forEach(download);
+$('x-svg').onclick = async () => (await makeFiles(['svg'])).forEach(download);
+$('x-dxf').onclick = async () => (await makeFiles(['dxf'])).forEach(download);
+$('x-both').onclick = async () => (await makeFiles(['both'])).forEach(download);
+$('x-share').onclick = async () => shareOrDownload(await makeFiles(['png', 'svg', 'dxf']));
+
+// ---------- many names → sheet ----------
+$('b-go').onclick = async () => {
+  if (!ART){ alert('Open a design picture first.'); return; }
+  const names = $('b-names').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!names.length){ alert('Type the names, one per line.'); return; }
+  const bedW = S.bedW || 600, bedH = S.bedH || 400, g = S.bedGap || 4;
+  const sheets = [[]]; let x = g, y = g, rowH = 0;
+  for (let i = 0; i < names.length; i++){
+    status('⏳ Making ' + (i + 1) + ' of ' + names.length + '…'); await new Promise(r => setTimeout(r, 5));
+    const lines = S.lines.map((l, j) => j === 0 ? Object.assign({}, l, { text: names[i] }) : l);
+    await fontsReady(lines);
+    const p = buildFinal(lines);
+    if (p.W + 2 * g > bedW || p.H + 2 * g > bedH){ status(''); alert('One piece is bigger than the sheet. Make the sheet bigger.'); return; }
+    if (x + p.W + g > bedW){ x = g; y += rowH + g; rowH = 0; }
+    if (y + p.H + g > bedH){ sheets.push([]); x = g; y = g; rowH = 0; }
+    sheets[sheets.length - 1].push({ p, ox: x, oy: y, name: names[i] });
+    x += p.W + g; rowH = Math.max(rowH, p.H);
+  }
+  const files = []; const dpi = Math.min(Number(S.dpi), 200), s = dpi / 25.4;
+  for (let si = 0; si < sheets.length; si++){
+    status('⏳ Making sheet ' + (si + 1) + ' of ' + sheets.length + '…'); await new Promise(r => setTimeout(r, 5));
+    let imgs = '', cuts = '';
+    for (const it of sheets[si]){
+      const du = await blobDataUrl(await canvasBlob(renderPiece(it.p, s)));
+      imgs += `<image x="${f3(it.ox)}" y="${f3(it.oy)}" width="${f3(it.p.W)}" height="${f3(it.p.H)}" xlink:href="${du}" href="${du}" preserveAspectRatio="none"/>\n`;
+      cuts += cutSvgItems(it.p, it.ox, it.oy) + '\n';
+    }
+    const tag = 'sheet' + (si + 1) + '-of-' + sheets.length;
+    files.push(new File([svgDoc(bedW, bedH, imgs + cuts)], fileBase(true) + '-' + tag + '-PRINT+CUT.svg', { type: 'image/svg+xml' }));
+    files.push(new File([svgDoc(bedW, bedH, cuts)], fileBase(true) + '-' + tag + '-CUT.svg', { type: 'image/svg+xml' }));
+    files.push(new File([dxfDoc(sheets[si], bedH)], fileBase(true) + '-' + tag + '-CUT.dxf', { type: 'application/dxf' }));
+  }
+  status('');
+  $('b-info').textContent = '✅ ' + names.length + ' pieces on ' + sheets.length + ' sheet(s) of ' + bedW + ' × ' + bedH + ' mm.';
+  await shareOrDownload(files);
+};
+
+// ====================== 3) SAVED DESIGNS (this phone only) ======================
+function ddb(){ return new Promise((res, rej) => { const r = indexedDB.open('shopapp-designs', 1); r.onupgradeneeded = () => r.result.createObjectStore('designs', { keyPath: 'id' }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function dAll(){ const db = await ddb(); return new Promise(res => { const q = db.transaction('designs').objectStore('designs').getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); }); }
+async function dPut(v){ const db = await ddb(); return new Promise((res, rej) => { const tx = db.transaction('designs', 'readwrite'); tx.objectStore('designs').put(v); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+async function dDel(id){ const db = await ddb(); return new Promise(res => { const tx = db.transaction('designs', 'readwrite'); tx.objectStore('designs').delete(id); tx.oncomplete = res; }); }
+$('x-save').onclick = async () => {
+  if (!PIECE){ alert('Open a design picture first.'); return; }
+  const name = prompt('Name for this design:', SRC.name || 'Design'); if (name == null) return;
+  const t = renderPiece(PIECE, Math.min(300 / PIECE.W, 300 / PIECE.H));
+  try { await dPut({ id: Date.now(), name: name.trim() || 'Design', created: Date.now(), blob: SRC.blob, settings: JSON.parse(JSON.stringify(S)), thumb: t.toDataURL('image/png') }); toast('✅ Saved on this phone'); }
+  catch (e) { alert('Could not save: ' + (e.message || e)); }
+};
+async function renderLib(){
+  const all = (await dAll()).sort((a, b) => b.created - a.created);
+  $('lib').innerHTML = all.length ? all.map(d => `<div class="it"><img src="${d.thumb}" alt=""><div class="nm">${String(d.name).replace(/</g, '&lt;')}</div>
+    <div style="display:flex; gap:6px;"><button class="btn gold" data-open="${d.id}" style="flex:1; padding:8px; font-size:13px;">Open</button><button class="btn red" data-del="${d.id}" style="padding:8px 10px; font-size:13px;">✕</button></div></div>`).join('')
+    : '<div class="note" style="grid-column:1/-1;">No saved designs yet. In ✂️ Laser file, tap 💾 Save design.</div>';
+  $('lib').querySelectorAll('[data-open]').forEach(b => b.onclick = async () => {
+    const d = all.find(x => x.id === Number(b.dataset.open)); if (!d) return;
+    S = Object.assign(JSON.parse(JSON.stringify(DEF)), d.settings);
+    bindSettings(); linesUi();
+    document.querySelector('.tab[data-p=pg-laser]').click();
+    await loadPicture(d.blob, d.name);
+  });
+  $('lib').querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (confirm('Delete this saved design?')){ await dDel(Number(b.dataset.del)); renderLib(); } });
+}
+
+// ---- Add to Home Screen + offline ----
+(function(){
+  const btn = $('install-btn'); let deferred = null;
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none';
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.onclick = async () => {
+    if (deferred){ deferred.prompt(); try { await deferred.userChoice; } catch (e) {} deferred = null; return; }
+    alert('Add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+bindSettings(); linesUi();
+</script>
+</body>
+</html>
