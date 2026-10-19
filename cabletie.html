@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Cable Tie Billing</title>
+<link rel="manifest" href="cabletie.webmanifest">
+<link rel="icon" href="cabletie-icon-192.png">
+<link rel="apple-touch-icon" href="cabletie-icon-192.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="caps.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<style>
+  :root{ --gold:#f0c341; --gold-2:#b8912f; --bg:#050505; --card:#141414; --line:#2a2a2a; --text:#f2e8cf; --muted:#9a9a9a; --green:#4cd07d; --red:#ef6b5b; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; -webkit-tap-highlight-color:transparent; }
+  header{ display:flex; align-items:center; gap:8px; padding:10px 14px; position:sticky; top:0; z-index:5; background:rgba(5,5,5,0.96); border-bottom:1px solid var(--line); }
+  header h1{ flex:1; margin:0; font-family:Georgia, serif; color:var(--gold); font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hbtn{ background:none; border:1.5px solid var(--line); color:#c9c9c9; border-radius:8px; padding:7px 10px; font-weight:800; font-size:13px; text-decoration:none; white-space:nowrap; }
+  .wrap{ max-width:640px; margin:0 auto; padding:12px 14px 80px; }
+  .tabs{ display:flex; gap:6px; margin-bottom:12px; }
+  .tab{ flex:1; padding:11px 4px; border-radius:10px; border:1.5px solid var(--gold-2); background:none; color:var(--gold); font-weight:800; font-size:13px; }
+  .tab.active{ background:var(--gold); color:#000; }
+  .page{ display:none; } .page.active{ display:block; }
+  .card{ background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .card h2{ margin:0 0 10px; font-size:13px; letter-spacing:1px; color:var(--gold); }
+  label.lb{ display:block; font-size:12px; color:var(--muted); font-weight:700; margin:10px 0 5px; }
+  input, select, textarea{ width:100%; padding:10px; border-radius:8px; border:1.5px solid #333; background:#0b0b0b; color:#fff; font-size:15px; font-weight:700; font-family:Arial,sans-serif; }
+  .row{ display:flex; gap:8px; } .row > div{ flex:1; min-width:0; }
+  .btn{ border:none; border-radius:10px; padding:12px; font-weight:800; font-size:15px; cursor:pointer; }
+  .btn.gold{ background:var(--gold); color:#000; } .btn.ghost{ background:none; border:1.5px solid #3a3a3a; color:#ddd; }
+  .btn.green{ background:#1f7a46; color:#fff; } .btn.red{ background:#3a1210; color:#ff8a80; border:1.5px solid #5a2a25; }
+  .btns{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; } .btns .btn{ flex:1; min-width:130px; }
+  .note{ font-size:12px; color:var(--muted); line-height:1.5; margin-top:6px; }
+  .cats{ display:grid; grid-template-columns:repeat(2, 1fr); gap:8px; }
+  .cat{ background:#0d0d0d; border:2px solid #2a2a2a; border-radius:12px; padding:6px; text-align:center; color:#ddd; font-weight:800; font-size:12px; }
+  .cat img{ width:100%; height:92px; object-fit:contain; background:#fff; border-radius:8px; display:block; margin-bottom:5px; }
+  .cat.on{ border-color:var(--gold); color:var(--gold); }
+  .grp{ font-size:12px; font-weight:900; color:var(--gold-2); margin:12px 0 4px; letter-spacing:1px; }
+  .size{ display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #222; }
+  .size .m{ flex:1; font-weight:800; font-size:15px; }
+  .size .p{ font-weight:900; color:var(--green); min-width:62px; text-align:right; }
+  .size input{ width:62px; padding:8px 4px; text-align:center; }
+  .size .btn{ padding:9px 12px; font-size:14px; }
+  .it{ display:flex; align-items:center; gap:8px; padding:9px 0; border-bottom:1px solid #222; }
+  .it .nm{ flex:1; font-weight:800; font-size:14px; line-height:1.3; }
+  .it .nm small{ color:var(--muted); font-weight:700; }
+  .it input{ width:62px; padding:7px 4px; text-align:center; }
+  .it .amt{ min-width:72px; text-align:right; font-weight:900; }
+  .x{ background:none; border:1.5px solid #5a2a25; color:#ff8a80; border-radius:8px; padding:6px 9px; font-weight:900; }
+  .trow{ display:flex; justify-content:space-between; padding:6px 0; font-size:15px; font-weight:700; }
+  .trow.big{ font-size:20px; font-weight:900; color:var(--gold); border-top:1.5px solid #333; margin-top:6px; padding-top:10px; }
+  .tog{ display:flex; align-items:center; gap:10px; padding:9px 0; font-weight:800; }
+  .tog input[type=checkbox]{ width:22px; height:22px; accent-color:var(--gold); }
+  .bill{ background:#0d0d0d; border:1.5px solid #2a2a2a; border-radius:12px; padding:12px; margin-bottom:10px; }
+  .bill .t1{ display:flex; justify-content:space-between; font-weight:900; }
+  .bill .t2{ color:var(--muted); font-size:13px; margin-top:4px; }
+  .bill .btns .btn{ min-width:70px; padding:9px; font-size:13px; }
+  .badge{ font-size:11px; padding:3px 7px; border-radius:6px; font-weight:900; }
+  .badge.paid{ background:#123b22; color:#7be3a2; } .badge.due{ background:#3b2a10; color:#f5c46b; }
+  .plrow{ display:flex; gap:6px; align-items:center; margin-bottom:6px; }
+  .plrow input{ padding:8px; font-size:14px; }
+  .toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff; padding:11px 16px; border-radius:10px; font-weight:700; font-size:14px; z-index:200; display:none; border:1px solid #444; max-width:90%; text-align:center; }
+  #lock{ position:fixed; inset:0; z-index:100; background:#050505; display:none; flex-direction:column; align-items:center; justify-content:center; padding:24px; }
+  #sync{ font-size:11px; color:var(--muted); font-weight:700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔗 Cable Tie Billing</h1>
+  <span id="sync"></span>
+  <a class="hbtn" href="index.html">🏠</a>
+  <button class="hbtn" id="install-btn" style="background:var(--gold); color:#000; border-color:var(--gold);">📲 Add</button>
+</header>
+<div class="wrap">
+  <div class="tabs">
+    <button class="tab active" data-p="pg-bill">🧾 New bill</button>
+    <button class="tab" data-p="pg-list">📜 Bills</button>
+    <button class="tab" data-p="pg-price">💲 Price list</button>
+  </div>
+
+  <!-- =============== NEW BILL =============== -->
+  <div class="page active" id="pg-bill">
+    <div class="card">
+      <h2 id="bill-head">ESTIMATE</h2>
+      <div class="row">
+        <div><label class="lb">Estimate no.</label><input type="number" id="b-no" inputmode="numeric"></div>
+        <div><label class="lb">Date</label><input type="date" id="b-date"></div>
+      </div>
+      <label class="lb">Customer name</label><input type="text" id="b-name" list="cust-list" placeholder="Customer / firm name"><datalist id="cust-list"></datalist>
+      <div class="row">
+        <div><label class="lb">Phone</label><input type="tel" id="b-phone" inputmode="tel" placeholder="Mobile"></div>
+        <div><label class="lb">GSTIN (optional)</label><input type="text" id="b-gstin" placeholder="Customer GST no."></div>
+      </div>
+      <label class="lb">Address (optional)</label><input type="text" id="b-addr">
+    </div>
+
+    <div class="card">
+      <h2>ADD CABLE TIES</h2>
+      <div class="cats" id="cats"></div>
+      <div id="sizes"></div>
+      <details style="margin-top:12px;"><summary style="font-weight:800; color:var(--gold);">＋ Other item (not in list)</summary>
+        <div class="row"><div style="flex:2;"><label class="lb">Item</label><input type="text" id="m-name"></div><div><label class="lb">Rate ₹</label><input type="number" inputmode="decimal" id="m-rate"></div><div><label class="lb">Qty</label><input type="number" inputmode="decimal" id="m-qty" value="1"></div></div>
+        <div class="btns"><button class="btn ghost" id="m-add">＋ Add item</button></div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>ITEMS IN THIS BILL</h2>
+      <div id="items"></div>
+      <div class="tog"><input type="checkbox" id="pk-on"><label for="pk-on" style="flex:1;">Packing charge</label><input type="number" inputmode="decimal" id="pk-amt" placeholder="₹" style="width:110px;"></div>
+      <div class="tog"><input type="checkbox" id="gst-on"><label for="gst-on" style="flex:1;">Add GST 18%</label></div>
+      <label class="lb">Transport (optional)</label><input type="text" id="b-transport" placeholder="e.g. VRL, Blue Dart, self pickup">
+      <div id="totals" style="margin-top:10px;"></div>
+      <div class="tog"><input type="checkbox" id="paid-on"><label for="paid-on">Payment received (mark as PAID)</label></div>
+      <div class="btns"><button class="btn gold" id="save">💾 Save bill</button><button class="btn ghost" id="new">🆕 Clear / new</button></div>
+      <div class="btns"><button class="btn green" id="wa">💬 WhatsApp</button><button class="btn ghost" id="pdf">📄 PDF</button></div>
+    </div>
+  </div>
+
+  <!-- =============== BILL LIST =============== -->
+  <div class="page" id="pg-list">
+    <div class="card">
+      <input type="text" id="search" placeholder="🔍 Search name, phone or estimate no.">
+      <div id="sum" class="note"></div>
+    </div>
+    <div id="bills"></div>
+  </div>
+
+  <!-- =============== PRICE LIST =============== -->
+  <div class="page" id="pg-price">
+    <div class="card">
+      <h2>SHOP DETAILS (ON PDF)</h2>
+      <label class="lb">Shop name</label><input type="text" id="s-name">
+      <div class="row"><div><label class="lb">Phone</label><input type="tel" id="s-phone"></div><div><label class="lb">Your GSTIN</label><input type="text" id="s-gstin"></div></div>
+      <label class="lb">Address</label><input type="text" id="s-addr">
+      <div class="btns"><button class="btn gold" id="s-save">💾 Save shop details</button></div>
+    </div>
+    <div class="card">
+      <h2>PRICES</h2>
+      <select id="pl-cat"></select>
+      <div class="row" style="margin-top:8px;"><div><label class="lb">Sold per</label><input type="text" id="pl-unit" placeholder="PKT"></div><div style="flex:0 0 auto;"><label class="lb">Photo</label><button class="btn ghost" id="pl-photo" style="padding:9px 12px;">📷 Change</button></div></div>
+      <input type="file" id="pl-file" accept="image/*" style="display:none;">
+      <div class="note">Size group (inch) · Model · Price ₹. Empty price = not available.</div>
+      <div id="pl-rows" style="margin-top:8px;"></div>
+      <div class="btns"><button class="btn ghost" id="pl-add">＋ Add size</button><button class="btn gold" id="pl-save">💾 Save prices</button></div>
+      <button class="btn ghost" id="pl-reset" style="width:100%; margin-top:8px; font-size:13px;">↺ Reset this list to the original prices</button>
+    </div>
+    <div class="card">
+      <h2>APP LOCK</h2>
+      <div class="btns" style="margin-top:0;"><button class="btn ghost" id="pin-set">🔒 Set / change PIN</button><button class="btn ghost" id="pin-off">Remove PIN</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="lock">
+  <div style="font-size:44px;">🔒</div>
+  <div style="font-family:Georgia,serif; color:var(--gold); font-size:22px; margin:6px 0 16px;">Cable Tie Billing</div>
+  <input type="password" id="lock-pin" inputmode="numeric" maxlength="8" placeholder="PIN" style="max-width:240px; text-align:center; font-size:24px; letter-spacing:6px;">
+  <button class="btn gold" id="lock-go" style="margin-top:12px; width:240px;">Unlock</button>
+  <div id="lock-err" style="color:var(--red); font-weight:700; margin-top:10px; min-height:18px;"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ================= cloud (same Firebase as the Shop apps, saved under its own "ct-" names) =================
+const firebaseConfig = { apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU", authDomain: "shopsync-5eacc.firebaseapp.com", projectId: "shopsync-5eacc", storageBucket: "shopsync-5eacc.firebasestorage.app", messagingSenderId: "751907155720", appId: "1:751907155720:web:e81466b303562c70fc06bd" };
+let DB = null;
+try { firebase.initializeApp(firebaseConfig); DB = firebase.firestore(); if (location.protocol === 'https:') DB.enablePersistence({ synchronizeTabs: true }).catch(() => {}); } catch (e) { console.warn('cloud off', e); }
+const COLL = 'billing_kv', CHUNK = 900000;
+const sid = (k) => String(k).replace(/\//g, '_SLASH_');
+const cloud = {
+  async get(key){
+    if (!DB) throw new Error('offline');
+    const c = DB.collection(COLL), s = await c.doc(sid(key)).get(); if (!s.exists) return null;
+    const d = s.data(); if (!d.chunked) return d.value;
+    const parts = await Promise.all(Array.from({ length: d.chunkCount || 0 }, (_, i) => c.doc(sid(key) + '__chunk' + i).get()));
+    return parts.map(p => p.exists ? p.data().part : '').join('');
+  },
+  async set(key, value){
+    if (!DB) throw new Error('offline');
+    const c = DB.collection(COLL), str = String(value);
+    let prev = 0; try { const p = await c.doc(sid(key)).get(); if (p.exists && p.data().chunked) prev = p.data().chunkCount || 0; } catch (e) {}
+    if (str.length <= CHUNK){ await c.doc(sid(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }); }
+    else {
+      const ch = []; for (let i = 0; i < str.length; i += CHUNK) ch.push(str.slice(i, i + CHUNK));
+      await Promise.all(ch.map((part, i) => c.doc(sid(key) + '__chunk' + i).set({ part })));
+      await c.doc(sid(key)).set({ chunked: true, chunkCount: ch.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      for (let i = ch.length; i < prev; i++) c.doc(sid(key) + '__chunk' + i).delete().catch(() => {});
+    }
+  },
+  watch(key, fn){ if (DB) return DB.collection(COLL).doc(sid(key)).onSnapshot(() => fn(), () => {}); }
+};
+// local copy on the phone too (works without internet, synced when back online)
+const local = { get: (k) => localStorage.getItem('ct:' + k), set: (k, v) => { try { localStorage.setItem('ct:' + k, v); } catch (e) {} } };
+async function load(key, def){
+  if (local.get('pending:' + key) && local.get(key) != null){ try { await cloud.set(key, local.get(key)); localStorage.removeItem('ct:pending:' + key); } catch (e) { return JSON.parse(local.get(key)); } }
+  try { const v = await Promise.race([cloud.get(key), new Promise((_, r) => setTimeout(() => r(new Error('slow')), 12000))]); if (v != null){ local.set(key, v); return JSON.parse(v); } }
+  catch (e) { const v = local.get(key); if (v != null) return JSON.parse(v); }
+  const v = local.get(key); return v != null ? JSON.parse(v) : def;
+}
+async function store(key, obj){
+  const v = JSON.stringify(obj); local.set(key, v);
+  try { await cloud.set(key, v); setSync('☁️ saved'); return true; }
+  catch (e) { setSync('📱 saved on phone'); local.set('pending:' + key, '1'); return false; }
+}
+function setSync(t){ $('sync').textContent = t; }
+
+// ================= price lists =================
+const N = (inch, model, w, b) => ({ inch, model, w, b });
+const NYLON = [
+  N('4"', '1.9 X 100', 9, 9.5), N('4"', '2.5 X 100', 13, 14),
+  N('6"', '2 X 150', 15, 16), N('6"', '2.5 X 150', 22, 23), N('6"', '3.6 X 150', 28, 30),
+  N('8"', '2.2 X 200', 23, 24), N('8"', '2.5 X 200', 28, 30), N('8"', '3.6 X 200', 38, 40), N('8"', '4.8 X 200', 55, 60),
+  N('10"', '2.8 X 250', 38, 40), N('10"', '3.6 X 250', 50, 53), N('10"', '4.8 X 250', 70, 75),
+  N('12"', '3 X 300', 47, 49), N('12"', '3.6 X 300', 61, 64), N('12"', '4.8 X 300', 83, 88), N('12"', '7.6 X 300', 155, 165),
+  N('14"', '3.6 X 350', 71, 75), N('14"', '4.8 X 350', 105, 110),
+  N('16"', '3.6 X 400', 90, 96), N('16"', '4.8 X 400', 120, 125), N('16"', '7.6 X 400', 200, 210),
+  N('18"', '4.8 X 450', 150, 160), N('18"', '7.6 X 450', 260, 275),
+  N('20"', '4.8 X 500', 170, 180), N('22"', '7.6 X 550', 400, 430), N('26"', '7.6 X 650', 480, 500),
+  N('30.4"', '7.6 X 760', 550, 600), N('36.8"', '9 X 920', 1200, null)
+];
+const DEFAULT_CATS = [
+  { id: 'nw', name: 'NYLON CABLE TIE - WHITE', short: 'NYLON WHITE', photo: 'ct-nylon-white.jpg', unit: 'PKT', sizes: NYLON.map(r => ({ inch: r.inch, model: r.model, price: r.w })) },
+  { id: 'nb', name: 'NYLON CABLE TIE - BLACK', short: 'NYLON BLACK', photo: 'ct-nylon-black.jpg', unit: 'PKT', sizes: NYLON.filter(r => r.b != null).map(r => ({ inch: r.inch, model: r.model, price: r.b })) },
+  { id: 'ss', name: 'STAINLESS STEEL CABLE TIE', short: 'STAINLESS STEEL', photo: 'ct-steel.jpg', unit: 'PKT', sizes: [100, 150, 200, 250, 300, 350, 400, 450].map((l, i) => ({ inch: (l / 25).toFixed(0) + '"', model: '4.6 X ' + l, price: [160, 190, 220, 250, 280, 320, 350, 380][i] })) },
+  { id: 'mt', name: 'MARKER TIE', short: 'MARKER TIE', photo: 'ct-marker.jpg', unit: 'PKT', sizes: [{ inch: '4"', model: '2.5 X 100', price: 45 }] }
+];
+let CATS = JSON.parse(JSON.stringify(DEFAULT_CATS));
+let PHOTOS = {};   // replaced photos (from your phone)
+let SHOP = { name: 'TURNING POINT TROPHY', phone: '88501 40327', gstin: '', addr: '' };
+let BILLS = [];
+
+// ================= helpers =================
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const rs = (n) => '₹' + r2(n).toLocaleString('en-IN', { minimumFractionDigits: r2(n) % 1 ? 2 : 0, maximumFractionDigits: 2 });
+const rsP = (n) => 'Rs. ' + r2(n).toLocaleString('en-IN', { minimumFractionDigits: r2(n) % 1 ? 2 : 0, maximumFractionDigits: 2 });
+const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+const fmtDate = (s) => { if (!s) return ''; const [y, m, d] = s.split('-'); return d + '-' + m + '-' + y; };
+function toast(t){ const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2400); }
+const photoOf = (c) => PHOTOS[c.id] || c.photo;
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === t.dataset.p));
+  if (t.dataset.p === 'pg-list') renderBills();
+  if (t.dataset.p === 'pg-price') renderPriceList();
+  window.scrollTo(0, 0);
+});
+
+// ================= new bill =================
+let cur = blankBill(), curCat = 'nw';
+function nextNo(){ return BILLS.reduce((m, b) => Math.max(m, Number(b.no) || 0), 0) + 1; }
+function blankBill(){ return { id: null, no: null, date: today(), name: '', phone: '', gstin: '', addr: '', transport: '', items: [], packOn: false, pack: 0, gstOn: false, paid: false }; }
+function renderCats(){
+  $('cats').innerHTML = CATS.map(c => `<button type="button" class="cat ${c.id === curCat ? 'on' : ''}" data-c="${c.id}"><img src="${esc(photoOf(c))}" alt="">${esc(c.short || c.name)}</button>`).join('');
+  $('cats').querySelectorAll('.cat').forEach(b => b.onclick = () => { curCat = b.dataset.c; renderCats(); });
+  const c = CATS.find(x => x.id === curCat) || CATS[0];
+  let h = '', last = null;
+  c.sizes.forEach((s, i) => {
+    if (s.price == null || s.price === '') return;
+    if (s.inch !== last){ last = s.inch; h += `<div class="grp">${esc(s.inch || '')}</div>`; }
+    h += `<div class="size"><div class="m">${esc(s.model)}</div><div class="p">${rs(s.price)}</div><input type="number" inputmode="numeric" min="1" value="1" id="q-${i}"><button class="btn gold" data-add="${i}">＋</button></div>`;
+  });
+  $('sizes').innerHTML = `<div class="note" style="margin-top:10px;">${esc(c.name)} · price per ${esc(c.unit || 'PKT')}</div>` + h;
+  $('sizes').querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
+    const i = Number(b.dataset.add), s = c.sizes[i], q = parseFloat($('q-' + i).value) || 1;
+    const ex = cur.items.find(it => it.cat === c.id && it.model === s.model && it.price === Number(s.price));
+    if (ex) ex.qty = r2(ex.qty + q); else cur.items.push({ cat: c.id, name: c.name, model: s.model, inch: s.inch, price: Number(s.price), qty: q, unit: c.unit || 'PKT' });
+    $('q-' + i).value = 1; renderItems(); toast('✅ Added ' + s.model + ' × ' + q);
+  });
+}
+$('m-add').onclick = () => {
+  const n = $('m-name').value.trim(), p = parseFloat($('m-rate').value), q = parseFloat($('m-qty').value) || 1;
+  if (!n || !(p >= 0)){ alert('Enter item name and rate.'); return; }
+  cur.items.push({ cat: 'other', name: n, model: '', inch: '', price: p, qty: q, unit: 'PCS' });
+  $('m-name').value = ''; $('m-rate').value = ''; $('m-qty').value = 1; renderItems();
+};
+function calc(b){
+  const sub = r2(b.items.reduce((a, it) => a + it.price * it.qty, 0));
+  const pack = b.packOn ? r2(b.pack) : 0;
+  const gst = b.gstOn ? r2((sub + pack) * 0.18) : 0;
+  const raw = sub + pack + gst, total = Math.round(raw), round = r2(total - raw);
+  return { sub, pack, gst, round, total };
+}
+function readForm(){
+  cur.no = parseInt($('b-no').value, 10) || nextNo(); cur.date = $('b-date').value || today();
+  cur.name = $('b-name').value.trim(); cur.phone = $('b-phone').value.trim(); cur.gstin = $('b-gstin').value.trim(); cur.addr = $('b-addr').value.trim();
+  cur.transport = $('b-transport').value.trim();
+  cur.packOn = $('pk-on').checked; cur.pack = parseFloat($('pk-amt').value) || 0; cur.gstOn = $('gst-on').checked; cur.paid = $('paid-on').checked;
+}
+function fillForm(){
+  $('b-no').value = cur.no || nextNo(); $('b-date').value = cur.date || today();
+  $('b-name').value = cur.name || ''; $('b-phone').value = cur.phone || ''; $('b-gstin').value = cur.gstin || ''; $('b-addr').value = cur.addr || '';
+  $('b-transport').value = cur.transport || ''; $('pk-on').checked = !!cur.packOn; $('pk-amt').value = cur.pack || ''; $('gst-on').checked = !!cur.gstOn; $('paid-on').checked = !!cur.paid;
+  $('bill-head').textContent = cur.id ? 'EDITING ESTIMATE #' + cur.no : 'NEW ESTIMATE';
+  renderItems();
+}
+function renderItems(){
+  readForm();
+  $('items').innerHTML = cur.items.length ? cur.items.map((it, i) => `<div class="it"><div class="nm">${esc(it.model ? it.model : it.name)}${it.inch ? ' <small>(' + esc(it.inch) + ')</small>' : ''}<br><small>${esc(it.model ? it.name : '')} ${rs(it.price)} / ${esc(it.unit)}</small></div>
+    <input type="number" inputmode="decimal" value="${it.qty}" data-q="${i}"><div class="amt">${rs(it.price * it.qty)}</div><button class="x" data-del="${i}">✕</button></div>`).join('')
+    : '<div class="note">No items yet — tap a cable tie above and press ＋.</div>';
+  $('items').querySelectorAll('[data-q]').forEach(el => el.oninput = () => { cur.items[el.dataset.q].qty = parseFloat(el.value) || 0; renderTotals(); el.parentElement.querySelector('.amt').textContent = rs(cur.items[el.dataset.q].price * cur.items[el.dataset.q].qty); });
+  $('items').querySelectorAll('[data-del]').forEach(el => el.onclick = () => { cur.items.splice(Number(el.dataset.del), 1); renderItems(); });
+  renderTotals();
+}
+function renderTotals(){
+  readForm();
+  const t = calc(cur);
+  $('totals').innerHTML = `<div class="trow"><span>Subtotal</span><span>${rs(t.sub)}</span></div>`
+    + (cur.packOn ? `<div class="trow"><span>Packing</span><span>+ ${rs(t.pack)}</span></div>` : '')
+    + (cur.gstOn ? `<div class="trow"><span>GST 18%</span><span>+ ${rs(t.gst)}</span></div>` : '')
+    + (t.round ? `<div class="trow" style="color:var(--muted); font-size:13px;"><span>Round off</span><span>${t.round > 0 ? '+' : '−'} ${rs(Math.abs(t.round))}</span></div>` : '')
+    + `<div class="trow big"><span>TOTAL</span><span>${rs(t.total)}</span></div>`;
+}
+['pk-on', 'pk-amt', 'gst-on', 'paid-on'].forEach(id => $(id).addEventListener('input', renderTotals));
+$('pk-on').addEventListener('change', () => { if ($('pk-on').checked && !$('pk-amt').value) $('pk-amt').focus(); renderTotals(); });
+$('gst-on').addEventListener('change', renderTotals);
+$('b-name').addEventListener('change', () => { // fill phone / address from an earlier bill
+  const n = $('b-name').value.trim().toUpperCase(); const p = BILLS.find(b => (b.name || '').toUpperCase() === n);
+  if (p){ if (!$('b-phone').value) $('b-phone').value = p.phone || ''; if (!$('b-addr').value) $('b-addr').value = p.addr || ''; if (!$('b-gstin').value) $('b-gstin').value = p.gstin || ''; }
+});
+function custList(){ const seen = new Set(); $('cust-list').innerHTML = BILLS.filter(b => b.name && !seen.has(b.name.toUpperCase()) && seen.add(b.name.toUpperCase())).map(b => `<option value="${esc(b.name)}">`).join(''); }
+let saving = false;
+async function saveBill(silent){
+  readForm();
+  if (!cur.items.length){ alert('Add at least one item.'); return false; }
+  if (saving) return false; saving = true;
+  try {
+    const t = calc(cur);
+    if (!cur.id && BILLS.some(b => Number(b.no) === Number(cur.no))) cur.no = nextNo();
+    const bill = Object.assign({}, cur, t, { id: cur.id || Date.now(), updated: Date.now() });
+    // newest copy of the list from the cloud first, so another phone's bills are never overwritten
+    BILLS = await load('ct-bills', BILLS);
+    const i = BILLS.findIndex(b => b.id === bill.id);
+    if (i >= 0) BILLS[i] = bill; else BILLS.unshift(bill);
+    const ok = await store('ct-bills', BILLS);
+    cur = JSON.parse(JSON.stringify(bill)); fillForm(); custList();
+    if (!silent) toast(ok ? '✅ Saved — estimate #' + bill.no : '📱 Saved on this phone — will go to cloud when online');
+    return bill;
+  } finally { saving = false; }
+}
+$('save').onclick = () => saveBill(false);
+$('new').onclick = () => { if (cur.items.length && !cur.id && !confirm('Clear this bill? (It is not saved.)')) return; cur = blankBill(); fillForm(); window.scrollTo(0, 0); };
+
+// ================= WhatsApp + PDF =================
+function billText(b){
+  const t = calc(b); const L = [];
+  L.push('*' + (SHOP.name || 'ESTIMATE') + '*'); L.push('ESTIMATE #' + b.no + '  ·  ' + fmtDate(b.date)); if (b.name) L.push('TO: ' + b.name); L.push('');
+  b.items.forEach((it, i) => L.push((i + 1) + '. ' + (it.model ? it.name + ' ' + it.model + (it.inch ? ' (' + it.inch + ')' : '') : it.name) + '\n    ' + it.qty + ' ' + it.unit + ' × ' + rsP(it.price) + ' = ' + rsP(it.price * it.qty)));
+  L.push(''); L.push('Subtotal: ' + rsP(t.sub));
+  if (b.packOn) L.push('Packing: ' + rsP(t.pack));
+  if (b.gstOn) L.push('GST 18%: ' + rsP(t.gst));
+  if (t.round) L.push('Round off: ' + (t.round > 0 ? '+' : '-') + rsP(Math.abs(t.round)));
+  L.push('*TOTAL: ' + rsP(t.total) + '*');
+  if (b.transport) L.push('Transport: ' + b.transport);
+  L.push(''); L.push('TRANSPORT DAMAGE DISCLAIMER: We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company.');
+  if (SHOP.phone) L.push(''); if (SHOP.phone) L.push('📞 ' + SHOP.phone);
+  return L.join('\n');
+}
+$('wa').onclick = async () => {
+  const b = await saveBill(true); if (!b) return;
+  let num = String(b.phone || '').replace(/\D/g, '');
+  if (!num){ num = (prompt('Customer\'s WhatsApp number:') || '').replace(/\D/g, ''); if (!num) return; }
+  if (num.length === 10) num = '91' + num;
+  window.open('https://wa.me/' + num + '?text=' + encodeURIComponent((window.capsText || String)(billText(b))), '_blank');
+};
+function makePdf(b){
+  const { jsPDF } = window.jspdf || {}; if (!jsPDF){ alert('The PDF tool could not load — connect to the internet once and reopen the app.'); return null; }
+  const t = calc(b), doc = new jsPDF({ unit: 'mm', format: 'a4' }), W = 210, M = 14;
+  const gold = [184, 145, 47];
+  let y = 16;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(20, 20, 20); doc.text(SHOP.name || '', W / 2, y, { align: 'center' }); y += 6;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(80, 80, 80);
+  const sub = [SHOP.addr, SHOP.phone ? 'Ph: ' + SHOP.phone : '', SHOP.gstin ? 'GSTIN: ' + SHOP.gstin : ''].filter(Boolean).join('   |   ');
+  if (sub){ doc.text(doc.splitTextToSize(sub, W - 2 * M), W / 2, y, { align: 'center' }); y += 6; }
+  doc.setDrawColor(...gold); doc.setLineWidth(0.8); doc.line(M, y, W - M, y); y += 7;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(20, 20, 20); doc.text('ESTIMATE', M, y);
+  doc.setFontSize(10); doc.text('No: ' + b.no + '     Date: ' + fmtDate(b.date), W - M, y, { align: 'right' }); y += 7;
+  doc.setFont('helvetica', 'normal');
+  [['To', b.name], ['Phone', b.phone], ['GSTIN', b.gstin], ['Address', b.addr]].forEach(([k, v]) => { if (!v) return; doc.setFont('helvetica', 'bold'); doc.text(k + ':', M, y); doc.setFont('helvetica', 'normal'); const ls = doc.splitTextToSize(v, W - 2 * M - 22); doc.text(ls, M + 22, y); y += 5 * ls.length; });
+  y += 3;
+  const cols = [M, M + 10, M + 112, M + 135, M + 158], ends = W - M;
+  const head = () => { doc.setFillColor(30, 30, 30); doc.rect(M, y - 5, W - 2 * M, 8, 'F'); doc.setTextColor(240, 195, 65); doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+    doc.text('#', cols[0] + 2, y); doc.text('ITEM', cols[1], y); doc.text('QTY', cols[2] + 18, y, { align: 'right' }); doc.text('RATE', cols[3] + 20, y, { align: 'right' }); doc.text('AMOUNT', ends - 2, y, { align: 'right' }); y += 8; doc.setTextColor(20, 20, 20); doc.setFont('helvetica', 'normal'); };
+  head();
+  b.items.forEach((it, i) => {
+    const nm = it.model ? it.name + ' ' + it.model + (it.inch ? ' (' + it.inch + ')' : '') : it.name;
+    const ls = doc.splitTextToSize(nm, cols[2] - cols[1] - 2), h = 5 * ls.length + 2;
+    if (y + h > 270){ doc.addPage(); y = 20; head(); }
+    if (i % 2) { doc.setFillColor(245, 245, 245); doc.rect(M, y - 4.5, W - 2 * M, h, 'F'); }
+    doc.text(String(i + 1), cols[0] + 2, y); doc.text(ls, cols[1], y);
+    doc.text(String(it.qty) + ' ' + it.unit, cols[2] + 18, y, { align: 'right' }); doc.text(rsP(it.price), cols[3] + 20, y, { align: 'right' }); doc.text(rsP(it.price * it.qty), ends - 2, y, { align: 'right' });
+    y += h;
+  });
+  if (y > 225){ doc.addPage(); y = 20; }
+  y += 2; doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.3); doc.line(M + 95, y, ends, y); y += 6;
+  const tr = (k, v, big) => { doc.setFont('helvetica', big ? 'bold' : 'normal'); doc.setFontSize(big ? 13 : 10.5); doc.text(k, M + 98, y); doc.text(v, ends - 2, y, { align: 'right' }); y += big ? 8 : 6; };
+  tr('Subtotal', rsP(t.sub));
+  if (b.packOn) tr('Packing', '+ ' + rsP(t.pack));
+  if (b.gstOn) tr('GST @ 18%', '+ ' + rsP(t.gst));
+  if (t.round) tr('Round off', (t.round > 0 ? '+ ' : '- ') + rsP(Math.abs(t.round)));
+  doc.setFillColor(...gold); doc.rect(M + 95, y - 5.5, ends - M - 95, 9, 'F'); doc.setTextColor(0, 0, 0); tr('TOTAL', rsP(t.total), true);
+  if (b.paid){ doc.setTextColor(30, 130, 70); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('PAID', M, y - 8); doc.setTextColor(20, 20, 20); }
+  if (b.transport){ y += 2; doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('Transport: ' + b.transport, M, y); y += 8; }
+  const disc = 'TRANSPORT DAMAGE DISCLAIMER: We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company.';
+  doc.setFontSize(8.5); const dl = doc.splitTextToSize(disc, W - 2 * M - 6);
+  if (y + dl.length * 4 + 8 > 285){ doc.addPage(); y = 20; }
+  doc.setDrawColor(190, 60, 50); doc.setLineWidth(0.4); doc.rect(M, y, W - 2 * M, dl.length * 4 + 5); doc.setFont('helvetica', 'normal'); doc.setTextColor(120, 30, 25); doc.text(dl, M + 3, y + 5);
+  const n = doc.getNumberOfPages();
+  for (let p = 1; p <= n; p++){ doc.setPage(p); doc.setFontSize(8.5); doc.setTextColor(130, 130, 130); doc.text('Page ' + p + ' of ' + n, W / 2, 292, { align: 'center' }); }
+  return doc;
+}
+$('pdf').onclick = async () => {
+  const b = await saveBill(true); if (!b) return;
+  const doc = makePdf(b); if (!doc) return;
+  const name = 'Estimate-' + b.no + (b.name ? '-' + b.name.replace(/[^\w]+/g, '-') : '') + '.pdf';
+  const file = new File([doc.output('blob')], name, { type: 'application/pdf' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: name }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  doc.save(name);
+};
+
+// ================= bill list =================
+function renderBills(){
+  const q = $('search').value.trim().toLowerCase();
+  const list = BILLS.filter(b => !q || String(b.no).includes(q) || (b.name || '').toLowerCase().includes(q) || (b.phone || '').includes(q));
+  const due = BILLS.filter(b => !b.paid).reduce((a, b) => a + (b.total || 0), 0);
+  $('sum').textContent = BILLS.length + ' bill(s) · unpaid total ' + rs(due);
+  $('bills').innerHTML = list.length ? list.map(b => `<div class="bill"><div class="t1"><span>#${b.no} ${esc(b.name || '(NO NAME)')}</span><span>${rs(b.total)}</span></div>
+    <div class="t2">${fmtDate(b.date)} · ${b.items.length} item(s)${b.gstOn ? ' · GST' : ''} <span class="badge ${b.paid ? 'paid' : 'due'}">${b.paid ? 'PAID' : 'DUE'}</span></div>
+    <div class="btns"><button class="btn ghost" data-open="${b.id}">✏️ Open</button><button class="btn ghost" data-paid="${b.id}">${b.paid ? '↩ Unpaid' : '✅ Paid'}</button><button class="btn red" data-del="${b.id}">🗑</button></div></div>`).join('')
+    : '<div class="card note">No bills yet.</div>';
+  $('bills').querySelectorAll('[data-open]').forEach(el => el.onclick = () => { cur = JSON.parse(JSON.stringify(BILLS.find(b => b.id === Number(el.dataset.open)))); fillForm(); document.querySelector('.tab[data-p=pg-bill]').click(); });
+  $('bills').querySelectorAll('[data-paid]').forEach(el => el.onclick = async () => { BILLS = await load('ct-bills', BILLS); const b = BILLS.find(x => x.id === Number(el.dataset.paid)); if (!b) return; b.paid = !b.paid; await store('ct-bills', BILLS); renderBills(); });
+  $('bills').querySelectorAll('[data-del]').forEach(el => el.onclick = async () => { const b = BILLS.find(x => x.id === Number(el.dataset.del)); if (!b || !confirm('Delete estimate #' + b.no + ' (' + (b.name || '') + ')?')) return; BILLS = (await load('ct-bills', BILLS)).filter(x => x.id !== b.id); await store('ct-bills', BILLS); renderBills(); custList(); });
+}
+$('search').oninput = renderBills;
+
+// ================= price list editing =================
+function renderPriceList(){
+  $('s-name').value = SHOP.name || ''; $('s-phone').value = SHOP.phone || ''; $('s-gstin').value = SHOP.gstin || ''; $('s-addr').value = SHOP.addr || '';
+  const sel = $('pl-cat'), keep = sel.value || CATS[0].id;
+  sel.innerHTML = CATS.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join(''); sel.value = keep;
+  const c = CATS.find(x => x.id === sel.value);
+  $('pl-unit').value = c.unit || 'PKT';
+  $('pl-rows').innerHTML = c.sizes.map((s, i) => `<div class="plrow"><input type="text" value="${esc(s.inch || '')}" data-k="inch" data-i="${i}" style="flex:0 0 70px;"><input type="text" value="${esc(s.model)}" data-k="model" data-i="${i}"><input type="number" inputmode="decimal" value="${s.price == null ? '' : s.price}" data-k="price" data-i="${i}" style="flex:0 0 86px;"><button class="x" data-rm="${i}">✕</button></div>`).join('');
+  $('pl-rows').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { readPrices(); c.sizes.splice(Number(b.dataset.rm), 1); renderPriceList(); });
+}
+function readPrices(){
+  const c = CATS.find(x => x.id === $('pl-cat').value); c.unit = $('pl-unit').value.trim() || 'PKT';
+  $('pl-rows').querySelectorAll('input').forEach(el => { const s = c.sizes[el.dataset.i]; if (!s) return; s[el.dataset.k] = el.dataset.k === 'price' ? (el.value === '' ? null : parseFloat(el.value)) : el.value.trim(); });
+  return c;
+}
+$('pl-cat').onchange = renderPriceList;
+$('pl-add').onclick = () => { const c = readPrices(); c.sizes.push({ inch: '', model: '', price: null }); renderPriceList(); };
+$('pl-save').onclick = async () => { const c = readPrices(); c.sizes = c.sizes.filter(s => s.model); const ok = await store('ct-prices', CATS); renderCats(); renderPriceList(); toast(ok ? '✅ Prices saved' : '📱 Prices saved on this phone'); };
+$('pl-reset').onclick = async () => { const id = $('pl-cat').value; if (!confirm('Put back the original prices for this list?')) return; const d = DEFAULT_CATS.find(x => x.id === id); const i = CATS.findIndex(x => x.id === id); CATS[i] = JSON.parse(JSON.stringify(d)); await store('ct-prices', CATS); renderCats(); renderPriceList(); };
+$('pl-photo').onclick = () => $('pl-file').click();
+$('pl-file').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(f); });
+  const s = Math.min(1, 600 / Math.max(im.naturalWidth, im.naturalHeight)), c = document.createElement('canvas');
+  c.width = Math.round(im.naturalWidth * s); c.height = Math.round(im.naturalHeight * s);
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(im, 0, 0, c.width, c.height);
+  PHOTOS[$('pl-cat').value] = c.toDataURL('image/jpeg', 0.8);
+  const ok = await store('ct-photos', PHOTOS); renderCats(); toast(ok ? '✅ Photo changed' : '📱 Photo saved on this phone');
+};
+$('s-save').onclick = async () => { SHOP = { name: $('s-name').value.trim(), phone: $('s-phone').value.trim(), gstin: $('s-gstin').value.trim(), addr: $('s-addr').value.trim() }; const ok = await store('ct-settings', SHOP); toast(ok ? '✅ Shop details saved' : '📱 Saved on this phone'); };
+
+// ================= PIN lock (this phone) =================
+function hashPin(pin, salt){ let h1 = 0xdeadbeef, h2 = 0x41c6ce57; const s = salt + ':' + pin + ':ct'; for (let r = 0; r < 300; r++) for (let i = 0; i < s.length; i++){ const ch = s.charCodeAt(i) + r; h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); } return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36); }
+const getPin = () => { try { return JSON.parse(localStorage.getItem('ct-pin') || 'null'); } catch (e) { return null; } };
+$('pin-set').onclick = () => { const p1 = prompt('New PIN (4–8 digits):'); if (!p1) return; if (!/^\d{4,8}$/.test(p1)){ alert('Use 4 to 8 digits.'); return; } if (prompt('Type the PIN again:') !== p1){ alert('PINs did not match.'); return; } const salt = Math.random().toString(36).slice(2, 10); localStorage.setItem('ct-pin', JSON.stringify({ salt, hash: hashPin(p1, salt) })); toast('🔒 PIN set'); };
+$('pin-off').onclick = () => { if (getPin() && confirm('Remove the PIN?')){ localStorage.removeItem('ct-pin'); toast('PIN removed'); } };
+function lockIfNeeded(){ if (!getPin()) return; $('lock').style.display = 'flex'; $('lock-pin').value = ''; }
+$('lock-go').onclick = () => { const p = getPin(); if (!p || hashPin($('lock-pin').value, p.salt) === p.hash){ $('lock').style.display = 'none'; $('lock-err').textContent = ''; } else { $('lock-err').textContent = 'Wrong PIN'; $('lock-pin').value = ''; } };
+$('lock-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lock-go').onclick(); });
+
+// ================= install + start =================
+(function(){
+  const btn = $('install-btn'); let deferred = null;
+  if ((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone) btn.style.display = 'none';
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { btn.style.display = 'none'; });
+  btn.onclick = async () => { if (deferred){ deferred.prompt(); try { await deferred.userChoice; } catch (e) {} deferred = null; return; } alert('Add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")'); };
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+async function syncPending(){ for (const k of ['ct-bills', 'ct-prices', 'ct-photos', 'ct-settings']){ if (local.get('pending:' + k)){ try { await cloud.set(k, local.get(k)); localStorage.removeItem('ct:pending:' + k); } catch (e) {} } } }
+(async function start(){
+  lockIfNeeded();
+  setSync('⏳');
+  fillForm(); renderCats();
+  await syncPending();
+  const [bills, prices, photos, settings] = await Promise.all([load('ct-bills', []), load('ct-prices', null), load('ct-photos', {}), load('ct-settings', null)]);
+  BILLS = Array.isArray(bills) ? bills : [];
+  if (Array.isArray(prices) && prices.length) CATS = prices;
+  PHOTOS = photos || {};
+  if (settings) SHOP = settings;
+  else { try { const s = await load('shop-settings', null); if (s && s.name) SHOP = { name: s.name, phone: s.phone || SHOP.phone, gstin: s.gstin || '', addr: s.address || '' }; } catch (e) {} }
+  setSync(DB ? '☁️' : '📱');
+  if (!cur.id && !cur.items.length) $('b-no').value = nextNo();
+  renderCats(); custList();
+  cloud.watch('ct-bills', async () => { try { const v = await cloud.get('ct-bills'); if (v){ local.set('ct-bills', v); BILLS = JSON.parse(v); custList(); if ($('pg-list').classList.contains('active')) renderBills(); if (!cur.id && !cur.items.length) $('b-no').value = nextNo(); } } catch (e) {} });
+  window.addEventListener('online', syncPending);
+})();
+</script>
+</body>
+</html>

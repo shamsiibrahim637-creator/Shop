@@ -1,0 +1,25 @@
+{
+  "id": "./cabletie.html",
+  "name": "Cable Tie Billing",
+  "short_name": "Cable Ties",
+  "start_url": "./cabletie.html",
+  "scope": "./cabletie",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [
+    {
+      "src": "cabletie-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "cabletie-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
