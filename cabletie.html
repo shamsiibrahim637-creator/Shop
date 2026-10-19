@@ -113,7 +113,7 @@
       <h2>ITEMS IN THIS BILL</h2>
       <div id="items"></div>
       <div class="tog"><input type="checkbox" id="pk-on"><label for="pk-on" style="flex:1;">Packing charge</label><input type="number" inputmode="decimal" id="pk-amt" placeholder="₹" style="width:110px;"></div>
-      <div class="tog"><input type="checkbox" id="gst-on"><label for="gst-on" style="flex:1;">Add GST 18%</label></div>
+      <div class="tog"><input type="checkbox" id="gst-on"><label for="gst-on" style="flex:1;">Add GST</label><input type="number" inputmode="decimal" id="gst-rate" value="18" style="width:80px;"><span style="font-weight:800;">%</span></div>
       <label class="lb">Transport (optional)</label><input type="text" id="b-transport" placeholder="e.g. VRL, Blue Dart, self pickup">
       <div id="totals" style="margin-top:10px;"></div>
       <div class="tog"><input type="checkbox" id="paid-on"><label for="paid-on">Payment received (mark as PAID)</label></div>
@@ -256,7 +256,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
 // ================= new bill =================
 let cur = blankBill(), curCat = 'nw';
 function nextNo(){ return BILLS.reduce((m, b) => Math.max(m, Number(b.no) || 0), 0) + 1; }
-function blankBill(){ return { id: null, no: null, date: today(), name: '', phone: '', gstin: '', addr: '', transport: '', items: [], packOn: false, pack: 0, gstOn: false, paid: false }; }
+function blankBill(){ return { id: null, no: null, date: today(), name: '', phone: '', gstin: '', addr: '', transport: '', items: [], packOn: false, pack: 0, gstOn: false, gstRate: Number(localStorage.getItem('ct-gst-rate')) || 18, paid: false }; }
 const norm = (t) => String(t || '').toLowerCase().replace(/[×*]/g, 'x').replace(/\s*x\s*/g, 'x').replace(/["”]/g, ' inch ').replace(/\s+/g, ' ').trim();
 function sizeRow(c, i){
   const s = c.sizes[i];
@@ -306,10 +306,11 @@ $('m-add').onclick = () => {
   cur.items.push({ cat: 'other', name: n, model: '', inch: '', price: p, qty: q, unit: 'PCS' });
   $('m-name').value = ''; $('m-rate').value = ''; $('m-qty').value = 1; renderItems();
 };
+const gstRate = (b) => (b && b.gstRate != null && b.gstRate >= 0) ? Number(b.gstRate) : 18;
 function calc(b){
   const sub = r2(b.items.reduce((a, it) => a + it.price * it.qty, 0));
   const pack = b.packOn ? r2(b.pack) : 0;
-  const gst = b.gstOn ? r2((sub + pack) * 0.18) : 0;
+  const gst = b.gstOn ? r2((sub + pack) * gstRate(b) / 100) : 0;
   const raw = sub + pack + gst, total = Math.round(raw), round = r2(total - raw);
   return { sub, pack, gst, round, total };
 }
@@ -317,12 +318,12 @@ function readForm(){
   cur.no = parseInt($('b-no').value, 10) || nextNo(); cur.date = $('b-date').value || today();
   cur.name = $('b-name').value.trim(); cur.phone = $('b-phone').value.trim(); cur.gstin = $('b-gstin').value.trim(); cur.addr = $('b-addr').value.trim();
   cur.transport = $('b-transport').value.trim();
-  cur.packOn = $('pk-on').checked; cur.pack = parseFloat($('pk-amt').value) || 0; cur.gstOn = $('gst-on').checked; cur.paid = $('paid-on').checked;
+  cur.packOn = $('pk-on').checked; cur.pack = parseFloat($('pk-amt').value) || 0; cur.gstOn = $('gst-on').checked; cur.gstRate = parseFloat($('gst-rate').value); if (!(cur.gstRate >= 0)) cur.gstRate = 18; if (cur.gstOn) localStorage.setItem('ct-gst-rate', cur.gstRate); cur.paid = $('paid-on').checked;
 }
 function fillForm(){
   $('b-no').value = cur.no || nextNo(); $('b-date').value = cur.date || today();
   $('b-name').value = cur.name || ''; $('b-phone').value = cur.phone || ''; $('b-gstin').value = cur.gstin || ''; $('b-addr').value = cur.addr || '';
-  $('b-transport').value = cur.transport || ''; $('pk-on').checked = !!cur.packOn; $('pk-amt').value = cur.pack || ''; $('gst-on').checked = !!cur.gstOn; $('paid-on').checked = !!cur.paid;
+  $('b-transport').value = cur.transport || ''; $('pk-on').checked = !!cur.packOn; $('pk-amt').value = cur.pack || ''; $('gst-on').checked = !!cur.gstOn; $('gst-rate').value = gstRate(cur); $('paid-on').checked = !!cur.paid;
   $('bill-head').textContent = cur.id ? 'EDITING ESTIMATE #' + cur.no : 'NEW ESTIMATE';
   renderItems();
 }
@@ -340,11 +341,11 @@ function renderTotals(){
   const t = calc(cur);
   $('totals').innerHTML = `<div class="trow"><span>Subtotal</span><span>${rs(t.sub)}</span></div>`
     + (cur.packOn ? `<div class="trow"><span>Packing</span><span>+ ${rs(t.pack)}</span></div>` : '')
-    + (cur.gstOn ? `<div class="trow"><span>GST 18%</span><span>+ ${rs(t.gst)}</span></div>` : '')
+    + (cur.gstOn ? `<div class="trow"><span>GST ${gstRate(cur)}%</span><span>+ ${rs(t.gst)}</span></div>` : '')
     + (t.round ? `<div class="trow" style="color:var(--muted); font-size:13px;"><span>Round off</span><span>${t.round > 0 ? '+' : '−'} ${rs(Math.abs(t.round))}</span></div>` : '')
     + `<div class="trow big"><span>TOTAL</span><span>${rs(t.total)}</span></div>`;
 }
-['pk-on', 'pk-amt', 'gst-on', 'paid-on'].forEach(id => $(id).addEventListener('input', renderTotals));
+['pk-on', 'pk-amt', 'gst-on', 'gst-rate', 'paid-on'].forEach(id => $(id).addEventListener('input', renderTotals));
 $('pk-on').addEventListener('change', () => { if ($('pk-on').checked && !$('pk-amt').value) $('pk-amt').focus(); renderTotals(); });
 $('gst-on').addEventListener('change', renderTotals);
 $('b-name').addEventListener('change', () => { // fill phone / address from an earlier bill
@@ -381,7 +382,7 @@ function billText(b){
   b.items.forEach((it, i) => L.push((i + 1) + '. ' + (it.model ? it.name + ' ' + it.model + (it.inch ? ' (' + it.inch + ')' : '') : it.name) + '\n    ' + it.qty + ' ' + it.unit + ' × ' + rsP(it.price) + ' = ' + rsP(it.price * it.qty)));
   L.push(''); L.push('Subtotal: ' + rsP(t.sub));
   if (b.packOn) L.push('Packing: ' + rsP(t.pack));
-  if (b.gstOn) L.push('GST 18%: ' + rsP(t.gst));
+  if (b.gstOn) L.push('GST ' + gstRate(b) + '%: ' + rsP(t.gst));
   if (t.round) L.push('Round off: ' + (t.round > 0 ? '+' : '-') + rsP(Math.abs(t.round)));
   L.push('*TOTAL: ' + rsP(t.total) + '*');
   if (b.transport) L.push('Transport: ' + b.transport);
@@ -428,7 +429,7 @@ function makePdf(b){
   const tr = (k, v, big) => { doc.setFont('helvetica', big ? 'bold' : 'normal'); doc.setFontSize(big ? 13 : 10.5); doc.text(k, M + 98, y); doc.text(v, ends - 2, y, { align: 'right' }); y += big ? 8 : 6; };
   tr('Subtotal', rsP(t.sub));
   if (b.packOn) tr('Packing', '+ ' + rsP(t.pack));
-  if (b.gstOn) tr('GST @ 18%', '+ ' + rsP(t.gst));
+  if (b.gstOn) tr('GST @ ' + gstRate(b) + '%', '+ ' + rsP(t.gst));
   if (t.round) tr('Round off', (t.round > 0 ? '+ ' : '- ') + rsP(Math.abs(t.round)));
   doc.setFillColor(...gold); doc.rect(M + 95, y - 5.5, ends - M - 95, 9, 'F'); doc.setTextColor(0, 0, 0); tr('TOTAL', rsP(t.total), true);
   if (b.paid){ doc.setTextColor(30, 130, 70); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('PAID', M, y - 8); doc.setTextColor(20, 20, 20); }
@@ -453,7 +454,7 @@ function renderBills(){
   const due = BILLS.filter(b => !b.paid).reduce((a, b) => a + (b.total || 0), 0);
   $('sum').textContent = BILLS.length + ' bill(s) · unpaid total ' + rs(due);
   $('bills').innerHTML = list.length ? list.map(b => `<div class="bill"><div class="t1"><span>#${b.no} ${esc(b.name || '(NO NAME)')}</span><span>${rs(b.total)}</span></div>
-    <div class="t2">${fmtDate(b.date)} · ${b.items.length} item(s)${b.gstOn ? ' · GST' : ''} <span class="badge ${b.paid ? 'paid' : 'due'}">${b.paid ? 'PAID' : 'DUE'}</span></div>
+    <div class="t2">${fmtDate(b.date)} · ${b.items.length} item(s)${b.gstOn ? ' · GST ' + gstRate(b) + '%' : ''} <span class="badge ${b.paid ? 'paid' : 'due'}">${b.paid ? 'PAID' : 'DUE'}</span></div>
     <div class="btns"><button class="btn ghost" data-open="${b.id}">✏️ Open</button><button class="btn ghost" data-paid="${b.id}">${b.paid ? '↩ Unpaid' : '✅ Paid'}</button><button class="btn red" data-del="${b.id}">🗑</button></div></div>`).join('')
     : '<div class="card note">No bills yet.</div>';
   $('bills').querySelectorAll('[data-open]').forEach(el => el.onclick = () => { cur = JSON.parse(JSON.stringify(BILLS.find(b => b.id === Number(el.dataset.open)))); fillForm(); document.querySelector('.tab[data-p=pg-bill]').click(); });
