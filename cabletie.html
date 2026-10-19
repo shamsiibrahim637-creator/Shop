@@ -100,6 +100,7 @@
 
     <div class="card">
       <h2>ADD CABLE TIES</h2>
+      <input type="text" id="psearch" placeholder="🔍 Search size e.g. 4.8 x 300, 12 inch, steel 200, black" style="margin-bottom:10px;">
       <div class="cats" id="cats"></div>
       <div id="sizes"></div>
       <details style="margin-top:12px;"><summary style="font-weight:800; color:var(--gold);">＋ Other item (not in list)</summary>
@@ -256,24 +257,49 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
 let cur = blankBill(), curCat = 'nw';
 function nextNo(){ return BILLS.reduce((m, b) => Math.max(m, Number(b.no) || 0), 0) + 1; }
 function blankBill(){ return { id: null, no: null, date: today(), name: '', phone: '', gstin: '', addr: '', transport: '', items: [], packOn: false, pack: 0, gstOn: false, paid: false }; }
+const norm = (t) => String(t || '').toLowerCase().replace(/[×*]/g, 'x').replace(/\s*x\s*/g, 'x').replace(/["”]/g, ' inch ').replace(/\s+/g, ' ').trim();
+function sizeRow(c, i){
+  const s = c.sizes[i];
+  return `<div class="size"><div class="m">${esc(s.model)}${$('psearch').value.trim() ? ' <small style="color:var(--muted);">' + esc(s.inch || '') + '</small>' : ''}</div><div class="p">${rs(s.price)}</div><input type="number" inputmode="numeric" min="1" value="1" id="q-${c.id}-${i}"><button class="btn gold" data-add="${c.id}:${i}">＋</button></div>`;
+}
 function renderCats(){
+  const q = norm($('psearch').value);
+  $('cats').style.display = q ? 'none' : '';
   $('cats').innerHTML = CATS.map(c => `<button type="button" class="cat ${c.id === curCat ? 'on' : ''}" data-c="${c.id}"><img src="${esc(photoOf(c))}" alt="">${esc(c.short || c.name)}</button>`).join('');
   $('cats').querySelectorAll('.cat').forEach(b => b.onclick = () => { curCat = b.dataset.c; renderCats(); });
-  const c = CATS.find(x => x.id === curCat) || CATS[0];
-  let h = '', last = null;
-  c.sizes.forEach((s, i) => {
-    if (s.price == null || s.price === '') return;
-    if (s.inch !== last){ last = s.inch; h += `<div class="grp">${esc(s.inch || '')}</div>`; }
-    h += `<div class="size"><div class="m">${esc(s.model)}</div><div class="p">${rs(s.price)}</div><input type="number" inputmode="numeric" min="1" value="1" id="q-${i}"><button class="btn gold" data-add="${i}">＋</button></div>`;
-  });
-  $('sizes').innerHTML = `<div class="note" style="margin-top:10px;">${esc(c.name)} · price per ${esc(c.unit || 'PKT')}</div>` + h;
+  let h = '';
+  if (q){
+    const words = q.split(' ').filter(Boolean);
+    let found = 0;
+    CATS.forEach(c => {
+      const rows = [];
+      c.sizes.forEach((s, i) => {
+        if (s.price == null || s.price === '') return;
+        const hay = norm(c.name + ' ' + (c.short || '') + ' ' + s.model + ' ' + (s.inch || '')) + ' ' + norm(s.model).replace(/x/g, ' ');
+        if (words.every(w => hay.includes(w) || (/^\d+(\.\d+)?$/.test(w) && hay.includes(w + ' inch')))) rows.push(sizeRow(c, i));
+      });
+      if (rows.length){ found += rows.length; h += `<div class="grp" style="display:flex; align-items:center; gap:8px;"><img src="${esc(photoOf(c))}" style="width:34px; height:34px; object-fit:contain; background:#fff; border-radius:6px;">${esc(c.name)}</div>` + rows.join(''); }
+    });
+    $('sizes').innerHTML = found ? h : '<div class="note">No size found. Try only the numbers, e.g. "300" or "4.8".</div>';
+  } else {
+    const c = CATS.find(x => x.id === curCat) || CATS[0];
+    let last = null;
+    c.sizes.forEach((s, i) => {
+      if (s.price == null || s.price === '') return;
+      if (s.inch !== last){ last = s.inch; h += `<div class="grp">${esc(s.inch || '')}</div>`; }
+      h += sizeRow(c, i);
+    });
+    $('sizes').innerHTML = `<div class="note" style="margin-top:10px;">${esc(c.name)} · price per ${esc(c.unit || 'PKT')}</div>` + h;
+  }
   $('sizes').querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
-    const i = Number(b.dataset.add), s = c.sizes[i], q = parseFloat($('q-' + i).value) || 1;
+    const [cid, si] = b.dataset.add.split(':'), c = CATS.find(x => x.id === cid), i = Number(si), s = c.sizes[i];
+    const qel = $('q-' + cid + '-' + i), q = parseFloat(qel.value) || 1;
     const ex = cur.items.find(it => it.cat === c.id && it.model === s.model && it.price === Number(s.price));
     if (ex) ex.qty = r2(ex.qty + q); else cur.items.push({ cat: c.id, name: c.name, model: s.model, inch: s.inch, price: Number(s.price), qty: q, unit: c.unit || 'PKT' });
-    $('q-' + i).value = 1; renderItems(); toast('✅ Added ' + s.model + ' × ' + q);
+    qel.value = 1; renderItems(); toast('✅ Added ' + (c.short || c.name) + ' ' + s.model + ' × ' + q);
   });
 }
+$('psearch').addEventListener('input', renderCats);
 $('m-add').onclick = () => {
   const n = $('m-name').value.trim(), p = parseFloat($('m-rate').value), q = parseFloat($('m-qty').value) || 1;
   if (!n || !(p >= 0)){ alert('Enter item name and rate.'); return; }
