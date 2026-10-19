@@ -359,7 +359,6 @@ function billText(b){
   if (t.round) L.push('Round off: ' + (t.round > 0 ? '+' : '-') + rsP(Math.abs(t.round)));
   L.push('*TOTAL: ' + rsP(t.total) + '*');
   if (b.transport) L.push('Transport: ' + b.transport);
-  L.push(''); L.push('TRANSPORT DAMAGE DISCLAIMER: We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company.');
   if (SHOP.phone) L.push(''); if (SHOP.phone) L.push('📞 ' + SHOP.phone);
   return L.join('\n');
 }
@@ -408,10 +407,6 @@ function makePdf(b){
   doc.setFillColor(...gold); doc.rect(M + 95, y - 5.5, ends - M - 95, 9, 'F'); doc.setTextColor(0, 0, 0); tr('TOTAL', rsP(t.total), true);
   if (b.paid){ doc.setTextColor(30, 130, 70); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('PAID', M, y - 8); doc.setTextColor(20, 20, 20); }
   if (b.transport){ y += 2; doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text('Transport: ' + b.transport, M, y); y += 8; }
-  const disc = 'TRANSPORT DAMAGE DISCLAIMER: We are not responsible for any damage, breakage, or loss caused during transportation or by the courier/transport service. Customers are requested to check the goods upon delivery. Any transport-related damage must be claimed directly with the respective transport company.';
-  doc.setFontSize(8.5); const dl = doc.splitTextToSize(disc, W - 2 * M - 6);
-  if (y + dl.length * 4 + 8 > 285){ doc.addPage(); y = 20; }
-  doc.setDrawColor(190, 60, 50); doc.setLineWidth(0.4); doc.rect(M, y, W - 2 * M, dl.length * 4 + 5); doc.setFont('helvetica', 'normal'); doc.setTextColor(120, 30, 25); doc.text(dl, M + 3, y + 5);
   const n = doc.getNumberOfPages();
   for (let p = 1; p <= n; p++){ doc.setPage(p); doc.setFontSize(8.5); doc.setTextColor(130, 130, 130); doc.text('Page ' + p + ' of ' + n, W / 2, 292, { align: 'center' }); }
   return doc;
