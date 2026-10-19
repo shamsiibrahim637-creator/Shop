@@ -71,6 +71,7 @@
   .fab{ position:fixed; right:16px; bottom:18px; z-index:20; display:flex; gap:10px; }
   .fab .btn{ box-shadow:0 6px 18px rgba(0,0,0,0.6); padding:15px 18px; font-size:16px; border-radius:30px; }
 </style>
+<script src="caps.js"></script>
 </head>
 <body>
 <header>
@@ -540,7 +541,7 @@ $('bk-file').onchange = async (e) => {
 };
 $('bk-csv').onclick = () => {
   const rows = [['Book', 'Date', 'In/Out', 'Amount', 'Category', 'Name', 'Paid by', 'Note']];
-  state.entries.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')).forEach(e => rows.push([BOOKS[e.book] ? BOOKS[e.book].name : e.book, fmtDate(e.date), e.type === 'in' ? 'In' : 'Out', e.amount, e.category || '', e.person || '', e.mode || '', e.note || '']));
+  state.entries.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')).forEach(e => rows.push([BOOKS[e.book] ? BOOKS[e.book].name : e.book, fmtDate(e.date), e.type === 'in' ? 'In' : 'Out', e.amount, e.category || '', e.person || '', e.mode || '', e.note || ''].map(v => (window.capsText || String)(String(v)))));
   const csv = '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n');
   download('money-' + fmtDate(today()) + '.csv', csv, 'text/csv');
   $('menu-modal').style.display = 'none';

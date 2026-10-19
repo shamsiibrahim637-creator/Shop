@@ -12,6 +12,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="caps.js"></script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏆</text></svg>">
 <link rel="manifest" href="catalogue.webmanifest">
 <link rel="apple-touch-icon" href="catalogue-icon-192.png">
@@ -3842,7 +3843,7 @@ exportBtn.addEventListener('click', async () => {
         msg += ' — please confirm available size/price';
       }
       msg += '\n(From ' + pdfTitle + ' catalogue)';
-      return 'https://wa.me/' + shopWhatsappNumber + '?text=' + encodeURIComponent(msg);
+      return 'https://wa.me/' + shopWhatsappNumber + '?text=' + encodeURIComponent((window.capsText || String)(msg));
     }
 
     // Skip items marked entirely out of stock, and also skip items whose every

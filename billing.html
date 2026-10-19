@@ -12,6 +12,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="caps.js"></script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧾</text></svg>">
 <link rel="manifest" href="billing.webmanifest">
 <link rel="apple-touch-icon" href="billing-icon-192.png">
@@ -2434,7 +2435,7 @@ function sendEstimateToWhatsApp(bill){
     const isOnScreen = !bill.id || bill.id === editingBillId;
     if (isOnScreen && !customerPhoneInput.value.trim()) customerPhoneInput.value = typed.trim();
   }
-  const url = 'https://wa.me/' + number + '?text=' + encodeURIComponent(buildEstimateText(bill));
+  const url = 'https://wa.me/' + number + '?text=' + encodeURIComponent((window.capsText || String)(buildEstimateText(bill)));
   // Opens in a new tab / the WhatsApp app, so the bill stays open in the app
   // behind it (navigating this page away would lose an unsaved bill).
   const a = document.createElement('a');

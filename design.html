@@ -52,6 +52,7 @@
   .toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff; padding:11px 16px; border-radius:10px; font-weight:700; font-size:14px; z-index:200; display:none; border:1px solid #444; max-width:90%; text-align:center; }
   details summary{ cursor:pointer; font-weight:800; color:var(--gold); font-size:14px; }
 </style>
+<script src="caps.js"></script>
 </head>
 <body>
 <header>
@@ -72,17 +73,17 @@
       <h2>What design do you need?</h2>
       <label class="lb">Game / event</label><div class="chips" id="p-sport"></div>
       <label class="lb">Title on the trophy</label><div class="chips" id="p-title"></div>
-      <input type="text" id="p-title-custom" placeholder="Or type your own title (e.g. BEST FIELDER)" style="margin-top:8px;">
+      <input type="text" id="p-title-custom" data-nocaps placeholder="Or type your own title (e.g. BEST FIELDER)" style="margin-top:8px;">
       <label class="lb">Shape</label><div class="chips" id="p-shape"></div>
       <label class="lb">Colours</label><div class="chips" id="p-colour"></div>
       <label class="lb">Add these</label><div class="chips" id="p-extras"></div>
       <label class="lb">Background</label><div class="chips" id="p-bg"></div>
       <label class="lb">Anything else? (optional)</label>
-      <input type="text" id="p-custom" placeholder="e.g. add the year 2026, use a lion, tournament name…">
+      <input type="text" id="p-custom" data-nocaps placeholder="e.g. add the year 2026, use a lion, tournament name…">
     </div>
     <div class="card">
       <h2>Your ChatGPT prompt</h2>
-      <textarea id="p-out" rows="10" style="font-weight:400; font-size:14px; line-height:1.45;"></textarea>
+      <textarea id="p-out" data-nocaps rows="10" style="font-weight:400; font-size:14px; line-height:1.45;"></textarea>
       <div class="btns"><button class="btn gold" id="p-copy">📋 Copy prompt</button><a class="btn ghost" href="https://chatgpt.com/" target="_blank" rel="noopener" style="text-align:center; text-decoration:none;">🤖 Open ChatGPT</a></div>
       <div class="note">Paste it in ChatGPT and download the picture. Then go to <b>✂️ 2. Laser file</b> and open that picture. Tip: keep <b>Plain white</b> background for printing — the shop mockup is only for Instagram.</div>
     </div>
