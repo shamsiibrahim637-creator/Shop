@@ -1079,22 +1079,24 @@ window.__switchView = function(){};
       <input type="text" id="transport-input" placeholder="e.g. Blue Dart, VRL, self pickup...">
     </div>
 
+    <!-- Grand total is always rounded to the nearest rupee (no option needed) -->
+    <input type="checkbox" id="round-off-input" checked style="display:none;">
+
     <div class="field" style="margin-top:10px;">
-      <label style="display:flex; align-items:center; gap:8px;">
-        <input type="checkbox" id="round-off-input" checked style="width:18px; height:18px;">
-        Auto Round Off (Grand Total to nearest Rupee)
-      </label>
+      <button type="button" id="extra-pay-toggle" style="width:100%; background:none; border:1.5px dashed #555; color:#c9c9c9; border-radius:8px; padding:10px; font-weight:800; font-size:13px; cursor:pointer;">➕ Old balance / Advance received</button>
+      <div id="old-balance-hint" style="display:none; margin-top:6px; font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; line-height:1.4;"></div>
     </div>
 
+    <div id="extra-pay-box" style="display:none;">
     <div class="field" style="margin-top:10px;">
       <label>Old Balance (Rs.) — customer's earlier pending amount, optional</label>
       <input type="number" id="old-balance-input" placeholder="0" min="0" inputmode="decimal">
-      <div id="old-balance-hint" style="display:none; margin-top:6px; font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; line-height:1.4;"></div>
     </div>
 
     <div class="field" style="margin-top:10px;">
       <label>Advance Received (Rs.) — optional</label>
       <input type="number" id="advance-input" placeholder="0" min="0" inputmode="decimal">
+    </div>
     </div>
 
     <div class="totals">
@@ -1259,18 +1261,16 @@ function billBalance(bill){ return Math.round(((parseFloat(bill.total) || 0) + b
 const roundOffInput = document.getElementById('round-off-input');
 const roundOffRow = document.getElementById('roundoff-row');
 const roundOffDisplay = document.getElementById('roundoff-display');
-// Remember the Round Off choice for new bills on this phone.
-let roundOffDefault = true;
-roundOffInput.addEventListener('change', () => {
-  if (!editingBillId){
-    roundOffDefault = roundOffInput.checked;
-    storage.set('round-off-default', roundOffDefault ? '1' : '0').catch(() => null);
-  }
-  updateTotals();
-});
-storage.get('round-off-default').then(r => {
-  if (r && r.value != null){ roundOffDefault = r.value === '1'; if (!editingBillId){ roundOffInput.checked = roundOffDefault; updateTotals(); } }
-}).catch(() => null);
+// New bills are always rounded to the nearest rupee.
+const roundOffDefault = true;
+// Old Balance / Advance are only needed for some customers — kept folded away.
+const extraPayBox = document.getElementById('extra-pay-box');
+const extraPayToggle = document.getElementById('extra-pay-toggle');
+function setExtraPay(open){
+  extraPayBox.style.display = open ? 'block' : 'none';
+  extraPayToggle.textContent = open ? '➖ Hide old balance / advance' : '➕ Old balance / Advance received';
+}
+extraPayToggle.addEventListener('click', () => setExtraPay(extraPayBox.style.display === 'none'));
 const advanceRow = document.getElementById('advance-row');
 const advanceDisplay = document.getElementById('advance-display');
 const balanceRow = document.getElementById('balance-row');
@@ -1822,7 +1822,7 @@ function updateOldBalanceHint(){
   oldBalanceHint.style.display = 'block';
   oldBalanceHint.innerHTML = '💡 This customer has <b style="color:#e0705a;">' + money(pending) + '</b> pending on ' + count + ' earlier unpaid bill(s). ' +
     '<button type="button" id="use-old-balance-btn" style="margin-left:4px; background:none; border:1.5px solid #f0c341; color:#f0c341; border-radius:5px; padding:4px 10px; font-weight:800; font-size:12px; cursor:pointer;">Use ' + money(pending) + '</button>';
-  document.getElementById('use-old-balance-btn').onclick = () => { oldBalanceInput.value = pending; updateTotals(); };
+  document.getElementById('use-old-balance-btn').onclick = () => { setExtraPay(true); oldBalanceInput.value = pending; updateTotals(); };
 }
 customerNameInput.addEventListener('input', () => setTimeout(updateOldBalanceHint, 0));
 customerPhoneInput.addEventListener('input', () => setTimeout(updateOldBalanceHint, 0));
@@ -1951,6 +1951,7 @@ function resetBillForm(nextInvoiceNoValue){
   oldBalanceInput.value = '';
   oldBalanceHint.style.display = 'none';
   roundOffInput.checked = roundOffDefault;
+  setExtraPay(false);
   productSearch.value = '';
   manualName.value = '';
   manualQty.value = 1;
@@ -2712,6 +2713,7 @@ function renderBillsList(){
       advanceInput.value = bill.advance ? bill.advance : '';
       oldBalanceInput.value = billOldBalance(bill) ? bill.oldBalance : '';
       updateOldBalanceHint();
+      setExtraPay(!!(bill.advance || billOldBalance(bill)));
       roundOffInput.checked = !!bill.roundOffEnabled; // bills from before this option keep their exact total
       billFormTitle.textContent = 'Editing Invoice #' + bill.invoiceNo;
       renderBillItems();
