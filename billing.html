@@ -1392,7 +1392,11 @@ async function readCloudCatalogueProducts(onBatch){
         try { item = JSON.parse(r.value); } catch (e) { return; }
         if (item.outOfStock) return;
         const vars = item.variations && item.variations.length ? item.variations : [{}];
-        const out = vars.filter(v => !v.outOfStock).map(v => ({ name: item.name, code: v.code || '', inch: v.inch || '', dim: v.dim || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: item.thumb || item.dataUrl || '' }));
+        // a product with types (e.g. AC-42 BEST BATSMAN / BEST BOWLER) shows each type separately
+        const looks = [{ name: item.name + (Array.isArray(item.types) && item.types.length && item.mainTypeName ? ' ' + item.mainTypeName : ''), photo: item.thumb || item.dataUrl || '' }]
+          .concat((Array.isArray(item.types) ? item.types : []).filter(t => t && t.name).map(t => ({ name: item.name + ' ' + t.name, photo: t.thumb || item.thumb || '' })));
+        const out = [];
+        looks.forEach(lk => vars.filter(v => !v.outOfStock).forEach(v => out.push({ name: lk.name, code: v.code || '', inch: v.inch || '', dim: v.dim || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: lk.photo })));
         products.push(...out);
         if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
       })));

@@ -1341,6 +1341,13 @@ async function readCatalogueItems(catId){
     const r = await storage.get(photoKey(catId, it.id));
     it.dataUrl = r && r.value ? r.value : (it.thumb || '');
   }));
+  await Promise.all(loaded.map(async it => {
+    if (!itemTypes(it).length) return;
+    it.types = await Promise.all(itemTypes(it).map(async t => {
+      const r = await storage.get(typePhotoKey(catId, it.id, t.id));
+      return Object.assign({}, t, { dataUrl: r && r.value ? r.value : (t.thumb || '') });
+    }));
+  }));
   return loaded.map(it => { const c = { ...it }; delete c.thumb; delete c.hasPhoto; return c; });
 }
 
@@ -1351,7 +1358,11 @@ exportDataBtn.addEventListener('click', async () => {
     const name = current ? current.name : 'Catalogue';
     await loadFullPhotosInto(items);
     statusEl.textContent = '';
-    const fullItems = items.map(it => { const c = { ...it }; delete c.thumb; delete c.hasPhoto; return c; });
+    const fullItems = await Promise.all(items.map(async it => {
+      const c = { ...it }; delete c.thumb; delete c.hasPhoto;
+      if (itemTypes(it).length) c.types = await Promise.all(itemTypes(it).map(async t => Object.assign({}, t, { dataUrl: await fetchTypePhoto(currentCatalogueId, it, t) })));
+      return c;
+    }));
     downloadJsonFile({ type: 'trophy-catalogue-backup', catalogueName: name, items: fullItems }, name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '-backup.json');
   } catch (err) {
     console.error(err);
@@ -1401,6 +1412,19 @@ async function importOneCatalogue(name, srcItems, replaceCat){
       if (!it || it.id == null) throw new Error('missing id');
       const copy = { ...it };
       if (copy.dataUrl) copy.dataUrl = await ensureFirestoreSafeSize(copy.dataUrl);
+      if (Array.isArray(copy.types)){
+        copy.__typeFull = {};
+        copy.types = await Promise.all(copy.types.filter(t => t && t.id).map(async t => {
+          const tc = { ...t };
+          if (tc.dataUrl){
+            const full = await ensureFirestoreSafeSize(tc.dataUrl);
+            copy.__typeFull[tc.id] = full;
+            if (!tc.thumb) tc.thumb = await makeThumb(full);
+          }
+          delete tc.dataUrl;
+          return tc;
+        }));
+      }
       prepared.push(copy);
     } catch (e) {
       console.error('Failed to prepare item', it && it.name, e);
@@ -1419,6 +1443,9 @@ async function importOneCatalogue(name, srcItems, replaceCat){
   }
   const pairs = [];
   for (const it of prepared){
+    const typeFull = it.__typeFull || {};
+    delete it.__typeFull;
+    Object.keys(typeFull).forEach(tid => pairs.push([typePhotoKey(cat.id, it.id, tid), typeFull[tid]]));
     const { light, full } = await splitItem(it);
     if (full) pairs.push([photoKey(cat.id, it.id), full]);
     pairs.push([itemKey(cat.id, it.id), JSON.stringify(light)]);
@@ -1528,6 +1555,36 @@ const fullPhotoCache = new Map();  // photoKey -> full photo
 const photoDirty = new Set();      // product ids whose full photo still has to be saved
 
 function itemPhoto(item){ return (item && (item.thumb || item.dataUrl)) || ''; }
+
+// ---- TYPES: one product, several looks (e.g. AC-42 BEST BATSMAN / BEST BOWLER) ----
+// Sizes & prices stay shared. Each type keeps a small photo in the product
+// record and its full photo in its own record "photo:<catalogue>:<id>~<type>".
+const typePhotoKey = (catId, itemId, typeId) => photoKey(catId, itemId + '~' + typeId);
+function itemTypes(item){ return Array.isArray(item && item.types) ? item.types.filter(t => t && t.id) : []; }
+async function fetchTypePhoto(catId, item, t){
+  if (t.dataUrl) return t.dataUrl;
+  const k = typePhotoKey(catId, item.id, t.id);
+  if (fullPhotoCache.has(k)) return fullPhotoCache.get(k);
+  let v = '';
+  try { const r = await storage.get(k); v = r && r.value ? r.value : ''; } catch (e) { console.error(e); }
+  if (!v) v = t.thumb || '';
+  fullPhotoCache.set(k, v);
+  return v;
+}
+// For PDF / photo zip: a product with types becomes one entry per photo.
+async function expandTypes(list, catId){
+  catId = catId || currentCatalogueId;
+  const out = [];
+  for (const it of list){
+    const ts = itemTypes(it);
+    if (!ts.length){ out.push(it); continue; }
+    out.push(Object.assign({}, it, { name: it.name + (it.mainTypeName ? ' ' + it.mainTypeName : '') }));
+    const photos = await Promise.all(ts.map(t => fetchTypePhoto(catId, it, t)));
+    ts.forEach((t, i) => out.push(Object.assign({}, it, { id: it.id + '~' + t.id, name: it.name + ' ' + t.name, thumb: t.thumb, dataUrl: photos[i], types: undefined, mainTypeName: undefined })));
+  }
+  return out;
+}
+const cardTypeSel = new Map(); // product id -> type id shown on its card ('' = main photo)
 
 function makeThumb(dataUrl){
   return new Promise((resolve, reject) => {
@@ -2798,11 +2855,12 @@ async function saveItemToStorage(item){
   }
 }
 
-async function deleteItemFromStorage(id){
+async function deleteItemFromStorage(id, types){
   try {
     syncText.textContent = 'Saving...';
     await storage.delete(itemKey(currentCatalogueId, id), true).catch(() => null);
     storage.delete(photoKey(currentCatalogueId, id)).catch(() => null);
+    (types || []).forEach(t => storage.delete(typePhotoKey(currentCatalogueId, id, t.id)).catch(() => null));
     await saveIndex();
     syncText.textContent = 'Saved ✓';
   } catch (err) {
@@ -3604,6 +3662,117 @@ function buildInlineEditor(item){
   return card;
 }
 
+// ---- 🎨 Types / Photos editor ----
+let typesModal = null;
+const TYPE_SUGGESTIONS = ['BEST BATSMAN', 'BEST BOWLER', 'BEST FIELDER', 'PLAYER OF THE SERIES', 'MAN OF THE MATCH', 'WINNER', 'RUNNER UP', 'BEST PLAYER', 'GOLD', 'SILVER', 'BRONZE'];
+function openTypesEditor(item){
+  if (itemsLoadFailed){ alert('This catalogue did not load properly — tap ↻ Refresh first.'); return; }
+  if (!typesModal){
+    typesModal = document.createElement('div');
+    typesModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); display:none; flex-direction:column; align-items:center; overflow:auto; padding:14px; font-family:Arial,sans-serif;';
+    document.body.appendChild(typesModal);
+  }
+  const draft = { main: item.mainTypeName || '', types: itemTypes(item).map(t => ({ id: t.id, name: t.name, thumb: t.thumb })), removed: [] };
+  const btnCss = 'border-radius:6px; padding:8px 10px; font-weight:800; font-size:13px; cursor:pointer;';
+  const inCss = 'width:100%; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;';
+  let pickFor = null;
+  function render(){
+    typesModal.innerHTML = `
+      <div style="width:100%; max-width:480px; color:#f2f2f2;">
+        <div style="font-weight:900; font-size:17px; color:#f0c43f; margin-bottom:4px;">🎨 Types of ${escapeHtml(item.name)}</div>
+        <div style="font-size:12px; color:#bdbdbd; line-height:1.5; margin-bottom:12px;">Same sizes & prices — a different photo and name for each type. Each type shows as its own page in the PDF and its own choice in Billing.</div>
+        <div style="display:flex; gap:10px; align-items:center; background:#151515; border:1.5px solid #333; border-radius:10px; padding:8px; margin-bottom:8px;">
+          <img src="${itemPhoto(item)}" style="width:70px; height:70px; object-fit:contain; background:#fff; border-radius:6px; flex-shrink:0;">
+          <div style="flex:1; min-width:0;"><div style="font-size:11px; color:#bdbdbd; font-weight:700; margin-bottom:4px;">MAIN PHOTO — name of this type (optional)</div>
+          <input type="text" class="tm-main" value="${escapeHtml(draft.main)}" placeholder="e.g. BEST BATSMAN" style="${inCss}"></div>
+        </div>
+        ${draft.types.map((t, i) => `
+        <div style="display:flex; gap:10px; align-items:center; background:#151515; border:1.5px solid #333; border-radius:10px; padding:8px; margin-bottom:8px;">
+          ${t.thumb ? `<img src="${t.thumb}" style="width:70px; height:70px; object-fit:contain; background:#fff; border-radius:6px; flex-shrink:0;">` : `<div style="width:70px; height:70px; border-radius:6px; flex-shrink:0; border:1.5px dashed #f0c43f; display:flex; align-items:center; justify-content:center; font-size:11px; color:#f0c43f; text-align:center;">NO PHOTO</div>`}
+          <div style="flex:1; min-width:0;">
+            <input type="text" class="tm-name" data-i="${i}" value="${escapeHtml(t.name)}" placeholder="Type name" style="${inCss}">
+            <div style="display:flex; gap:6px; margin-top:6px;">
+              <button type="button" class="tm-photo" data-i="${i}" style="${btnCss} flex:1; background:none; border:1.5px solid #f0c43f; color:#f0c43f;">📷 ${t.thumb ? 'Change' : 'Add'} photo</button>
+              <button type="button" class="tm-up" data-i="${i}" ${i === 0 ? 'disabled' : ''} style="${btnCss} background:none; border:1.5px solid #555; color:#ddd;">↑</button>
+              <button type="button" class="tm-del" data-i="${i}" style="${btnCss} background:none; border:1.5px solid #8a3a30; color:#ff8a80;">✕</button>
+            </div>
+          </div>
+        </div>`).join('')}
+        <div style="font-size:12px; color:#bdbdbd; font-weight:700; margin:10px 0 6px;">Add a type — tap a name (or ✏️ Other):</div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          ${TYPE_SUGGESTIONS.filter(n => n !== draft.main.toUpperCase() && !draft.types.some(t => (t.name || '').toUpperCase() === n)).map(n => `<button type="button" class="tm-sugg" data-n="${n}" style="${btnCss} background:#1d1d1d; border:1.5px solid #444; color:#eee; font-size:12px;">＋ ${n}</button>`).join('')}
+          <button type="button" class="tm-sugg" data-n="" style="${btnCss} background:#1d1d1d; border:1.5px solid #f0c43f; color:#f0c43f; font-size:12px;">✏️ Other</button>
+        </div>
+        <div class="tm-status" style="color:#f0c43f; font-weight:800; font-size:13px; min-height:18px; margin-top:10px;"></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button type="button" class="tm-save" style="flex:2; padding:13px; border:none; border-radius:8px; background:#f0c43f; color:#000; font-weight:900; font-size:15px;">💾 Save types</button>
+          <button type="button" class="tm-close" style="flex:1; padding:13px; border:1.5px solid #555; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:14px;">Cancel</button>
+        </div>
+        <input type="file" class="tm-file" accept="image/*" style="display:none;">
+      </div>`;
+    const q = (c) => typesModal.querySelector(c), qa = (c) => typesModal.querySelectorAll(c);
+    q('.tm-main').addEventListener('input', (e) => { draft.main = e.target.value; });
+    qa('.tm-name').forEach(el => el.addEventListener('input', () => { draft.types[el.dataset.i].name = el.value; }));
+    qa('.tm-photo').forEach(el => el.addEventListener('click', () => { pickFor = Number(el.dataset.i); q('.tm-file').click(); }));
+    qa('.tm-up').forEach(el => el.addEventListener('click', () => { const i = Number(el.dataset.i); [draft.types[i - 1], draft.types[i]] = [draft.types[i], draft.types[i - 1]]; render(); }));
+    qa('.tm-del').forEach(el => el.addEventListener('click', () => {
+      const i = Number(el.dataset.i), t = draft.types[i];
+      if (!confirm('Remove type "' + (t.name || '') + '"?')) return;
+      draft.removed.push(t.id); draft.types.splice(i, 1); render();
+    }));
+    qa('.tm-sugg').forEach(el => el.addEventListener('click', () => {
+      let n = el.dataset.n;
+      if (!n){ n = prompt('Type name (e.g. BEST WICKET KEEPER):'); if (!n || !n.trim()) return; n = n.trim(); }
+      draft.types.push({ id: 't' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36), name: n, thumb: '', isNew: true });
+      pickFor = draft.types.length - 1; render(); q('.tm-file').click();
+    }));
+    q('.tm-file').addEventListener('change', async (e) => {
+      const f = e.target.files[0]; e.target.value = ''; if (!f || pickFor == null || !draft.types[pickFor]) return;
+      const t = draft.types[pickFor];
+      q('.tm-status').textContent = '⏳ Preparing photo...';
+      try {
+        const full = await ensureFirestoreSafeSize(await compressImage(f, 1000, 0.72));
+        t.newFull = full; t.thumb = await makeThumb(full);
+        render();
+      } catch (err) { console.error(err); q('.tm-status').textContent = '⚠️ Could not read that photo — try another.'; }
+    });
+    q('.tm-close').addEventListener('click', () => { typesModal.style.display = 'none'; document.body.style.overflow = ''; });
+    q('.tm-save').addEventListener('click', async () => {
+      const list = draft.types.map(t => Object.assign(t, { name: String(t.name || '').trim().toUpperCase() }));
+      const noName = list.find(t => !t.name), noPhoto = list.find(t => !t.thumb);
+      if (noName){ alert('Please give every type a name.'); return; }
+      if (noPhoto){ alert('Please add a photo for "' + noPhoto.name + '" (or remove it with ✕).'); return; }
+      const names = list.map(t => t.name); if (draft.main.trim()) names.push(draft.main.trim().toUpperCase());
+      if (new Set(names).size !== names.length){ alert('Two types have the same name — please make each name different.'); return; }
+      const saveBtn = q('.tm-save'); saveBtn.disabled = true; q('.tm-status').textContent = '⏳ Saving photos...';
+      try {
+        const catId = currentCatalogueId;
+        // new photos first, then the product record — so a product never points at a missing photo
+        for (const t of list.filter(t => t.newFull)){
+          await storage.set(typePhotoKey(catId, item.id, t.id), t.newFull);
+          fullPhotoCache.set(typePhotoKey(catId, item.id, t.id), t.newFull);
+        }
+        const live = items.find(i => i.id === item.id) || item;
+        live.types = list.map(t => ({ id: t.id, name: t.name, thumb: t.thumb }));
+        if (!live.types.length) delete live.types;
+        live.mainTypeName = draft.main.trim().toUpperCase();
+        if (!live.mainTypeName) delete live.mainTypeName;
+        await saveItemToStorage(live);
+        draft.removed.forEach(tid => { storage.delete(typePhotoKey(catId, item.id, tid)).catch(() => null); fullPhotoCache.delete(typePhotoKey(catId, item.id, tid)); });
+        if (!itemTypes(live).some(t => t.id === cardTypeSel.get(live.id))) cardTypeSel.delete(live.id);
+        typesModal.style.display = 'none'; document.body.style.overflow = '';
+        renderGrid();
+        statusEl.textContent = '✅ ' + (itemTypes(live).length ? (itemTypes(live).length + 1) + ' types saved for ' + live.name : 'Types removed from ' + live.name);
+      } catch (err) {
+        console.error(err); saveBtn.disabled = false;
+        q('.tm-status').textContent = '⚠️ Not saved — check internet and try again. (' + (err && err.message ? err.message : err) + ')';
+      }
+    });
+  }
+  render();
+  typesModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
+}
+
 function renderGrid(){
   grid.innerHTML = '';
   if (items.length === 0){
@@ -3625,7 +3794,8 @@ function renderGrid(){
     ? items.filter(item => {
         const nameMatch = item.name.toLowerCase().includes(query);
         const sizeMatch = item.variations.some(v => (v.code || '').toLowerCase().includes(query));
-        return nameMatch || sizeMatch;
+        const typeMatch = itemTypes(item).some(t => (item.name + ' ' + t.name).toLowerCase().includes(query)) || (item.name + ' ' + (item.mainTypeName || '')).toLowerCase().includes(query);
+        return nameMatch || sizeMatch || typeMatch;
       })
     : items;
   if (stockOnly){
@@ -3650,6 +3820,13 @@ function renderGrid(){
         </div>`;
     }).join('');
 
+    const types = itemTypes(item);
+    const selT = types.find(t => t.id === cardTypeSel.get(item.id));
+    const typeChipsHtml = types.length ? `<div style="display:flex; flex-wrap:wrap; gap:5px; padding:8px 10px 0;">${[{ id: '', name: item.mainTypeName || 'MAIN PHOTO' }].concat(types).map(t => {
+        const on = (selT ? selT.id : '') === t.id;
+        return `<button type="button" class="type-chip" data-id="${item.id}" data-t="${t.id}" style="background:${on ? 'var(--brass-light)' : 'none'}; color:${on ? '#000' : 'var(--brass-light)'}; border:1.5px solid var(--brass-light); border-radius:12px; padding:4px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:11px; cursor:pointer;">${escapeHtml(t.name)}</button>`;
+      }).join('')}</div>` : '';
+
     const card = document.createElement('div');
     card.className = 'item-card';
     card.setAttribute('data-item-id', item.id);
@@ -3658,13 +3835,15 @@ function renderGrid(){
     card.innerHTML = `
       ${isFiltering ? '' : `<div class="drag-handle" data-id="${item.id}">⠿ Hold &amp; drag to reorder</div>`}
       <div style="position:relative;">
-        <img src="${itemPhoto(item)}" loading="lazy" decoding="async" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
+        <img src="${selT ? selT.thumb : itemPhoto(item)}" loading="lazy" decoding="async" style="${item.outOfStock ? 'opacity:0.4;' : ''}">
+        ${types.length ? `<span style="position:absolute; bottom:6px; left:6px; background:rgba(0,0,0,0.75); color:var(--brass-light); font-family:Arial,sans-serif; font-weight:900; font-size:11px; padding:3px 8px; border-radius:5px;">🎨 ${types.length + 1} TYPES</span>` : ''}
         ${ctag ? `<span style="position:absolute; top:6px; left:6px; background:${ctag.color}; color:#fff; font-family:Arial,sans-serif; font-weight:900; font-size:12px; letter-spacing:0.5px; padding:4px 9px; border-radius:5px; box-shadow:0 1px 4px rgba(0,0,0,0.5); max-width:70%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(ctag.text)}</span>` : ''}
         ${item.outOfStock ? `<div style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; pointer-events:none;"><span style="background:rgba(179,70,44,0.92); color:#fff; font-family:Arial,sans-serif; font-weight:800; font-size:13px; padding:5px 12px; border-radius:5px; transform:rotate(-12deg); letter-spacing:0.5px;">OUT OF STOCK</span></div>` : ''}
         <button type="button" class="download-photo-btn" data-id="${item.id}" title="Download this photo" style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.7); border:1.5px solid var(--brass-light); color:var(--brass-light); border-radius:5px; padding:5px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:13px; cursor:pointer;">⬇</button>
       </div>
+      ${typeChipsHtml}
       <div class="item-body">
-        <p class="name"${ctag ? ` style="color:${ctag.color};"` : ''}>${ctag ? `<span style="display:inline-block; background:${ctag.color}; color:#fff; font-size:11px; font-weight:900; padding:2px 6px; border-radius:4px; margin-right:6px; vertical-align:middle;">${escapeHtml(ctag.text)}</span>` : ''}${escapeHtml(item.name)}</p>
+        <p class="name"${ctag ? ` style="color:${ctag.color};"` : ''}>${ctag ? `<span style="display:inline-block; background:${ctag.color}; color:#fff; font-size:11px; font-weight:900; padding:2px 6px; border-radius:4px; margin-right:6px; vertical-align:middle;">${escapeHtml(ctag.text)}</span>` : ''}${escapeHtml(item.name)}${selT ? ' ' + escapeHtml(selT.name) : (types.length && item.mainTypeName ? ' ' + escapeHtml(item.mainTypeName) : '')}</p>
         ${sizeRowsHtml}
       </div>
       <div style="display:flex; align-items:center; gap:6px; padding:8px 10px; border-top:1.5px solid var(--line); background:var(--navy);">
@@ -3686,6 +3865,9 @@ function renderGrid(){
         </div>
         <div class="row">
           <button class="ad-image-btn" data-id="${item.id}" style="font-size:13px; color:var(--brass-light);">📣 Make Ad Image</button>
+        </div>
+        <div class="row">
+          <button class="types-btn" data-id="${item.id}" style="font-size:13px; color:var(--brass-light);">🎨 Types / Photos${types.length ? ' (' + (types.length + 1) + ')' : ''}</button>
         </div>
       </div>
     `;
@@ -3711,11 +3893,34 @@ function renderGrid(){
       if (!item) return;
       const safeName = item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'photo';
       const a = document.createElement('a');
-      a.href = await fetchFullPhoto(currentCatalogueId, item);
-      a.download = safeName + '.jpg';
+      const selType = itemTypes(item).find(t => t.id === cardTypeSel.get(item.id));
+      a.href = selType ? await fetchTypePhoto(currentCatalogueId, item, selType) : await fetchFullPhoto(currentCatalogueId, item);
+      a.download = safeName + (selType ? '-' + selType.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() : '') + '.jpg';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+    });
+  });
+
+  __viewRoot.querySelectorAll('.type-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      cardTypeSel.set(id, btn.getAttribute('data-t') || '');
+      const card = btn.closest('.item-card');
+      const item = items.find(i => i.id === id);
+      if (!card || !item){ renderGrid(); return; }
+      const t = itemTypes(item).find(x => x.id === cardTypeSel.get(id));
+      const img = card.querySelector('img'); if (img) img.src = t ? t.thumb : itemPhoto(item);
+      card.querySelectorAll('.type-chip').forEach(c => { const on = c === btn; c.style.background = on ? 'var(--brass-light)' : 'none'; c.style.color = on ? '#000' : 'var(--brass-light)'; });
+      const nm = card.querySelector('.item-body .name');
+      if (nm){ const tagSpan = nm.querySelector('span'); nm.textContent = item.name + (t ? ' ' + t.name : (item.mainTypeName ? ' ' + item.mainTypeName : '')); if (tagSpan) nm.prepend(tagSpan); }
+    });
+  });
+
+  __viewRoot.querySelectorAll('.types-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = items.find(i => i.id === Number(btn.getAttribute('data-id')));
+      if (item) openTypesEditor(item);
     });
   });
 
@@ -3782,13 +3987,14 @@ function renderGrid(){
   __viewRoot.querySelectorAll('.remove-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = Number(btn.getAttribute('data-id'));
+      const goneTypes = itemTypes(items.find(i => i.id === id));
       items = items.filter(i => i.id !== id);
       if (inlineEditId === id){ inlineEditId = null; inlineDraft = null; }
       if (editingId === id){
         resetForm();
       }
       renderGrid();
-      deleteItemFromStorage(id);
+      deleteItemFromStorage(id, goneTypes);
     });
   });
 }
@@ -3813,6 +4019,8 @@ exportBtn.addEventListener('click', async () => {
   }
   exportBtn.disabled = true;
   try { await loadFullPhotosInto(items); } catch (e) { console.error(e); }
+  let pdfItems = items;
+  try { statusEl.textContent = '⏳ Getting type photos...'; pdfItems = await expandTypes(items); } catch (e) { console.error(e); pdfItems = items; }
   statusEl.textContent = 'Generating PDF...';
 
   try {
@@ -3848,7 +4056,7 @@ exportBtn.addEventListener('click', async () => {
 
     // Skip items marked entirely out of stock, and also skip items whose every
     // individual size is out of stock (nothing left to actually sell).
-    const inStockItems = items.filter(item => {
+    const inStockItems = pdfItems.filter(item => {
       if (item.outOfStock) return false;
       if (item.variations && item.variations.length > 0){
         return item.variations.some(v => !v.outOfStock);
@@ -4115,12 +4323,13 @@ exportPhotosBtn.addEventListener('click', async () => {
     statusEl.textContent = 'Preparing photos...';
     exportPhotosBtn.disabled = true;
     await loadFullPhotosInto(items);
+    const zipItems = await expandTypes(items);
 
     const currentCat = catalogues.find(c => c.id === currentCatalogueId);
     const zip = new JSZip();
     const usedNames = {};
 
-    items.forEach((item, idx) => {
+    zipItems.forEach((item, idx) => {
       let base = item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || ('product-' + (idx + 1));
       let filename = base + '.jpg';
       let counter = 2;
@@ -4145,7 +4354,7 @@ exportPhotosBtn.addEventListener('click', async () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    statusEl.textContent = items.length + ' photo(s) exported as a zip file.';
+    statusEl.textContent = zipItems.length + ' photo(s) exported as a zip file.';
   } catch (err) {
     console.error(err);
     statusEl.textContent = 'Something went wrong exporting photos.';
