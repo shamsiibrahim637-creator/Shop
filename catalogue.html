@@ -2040,6 +2040,7 @@ function openAdMaker(item){
           <input type="number" class="ad-pct" min="1" max="99" inputmode="numeric" style="width:64px; text-align:center; padding:7px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:15px;">
           <span style="color:#c9c9c9; font-size:13px;">% OFF</span>
         </div>
+        <select class="ad-type" style="width:100%; margin-bottom:10px; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;"></select>
         <div style="display:flex; gap:8px; margin-bottom:10px;">
           <select class="ad-style" style="flex:1; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;">
             <option value="premium">✨ Premium design</option>
@@ -2074,9 +2075,24 @@ function openAdMaker(item){
   syncSizeVisibility();
   adModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
   let blob = null, runId = 0;
-  const fileName = (item.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-offer.jpg';
+  // Product with types: choose which photo the ad is made from
+  const typeSel = adModal.querySelector('.ad-type');
+  const types = itemTypes(item);
+  typeSel.innerHTML = '<option value="">' + escapeHtml(item.name + (item.mainTypeName ? ' ' + item.mainTypeName : '') + (types.length ? ' (main photo)' : '')) + '</option>' +
+    types.map(t => '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(item.name + ' ' + t.name) + '</option>').join('');
+  typeSel.style.display = types.length ? '' : 'none';
+  typeSel.value = types.some(t => t.id === cardTypeSel.get(item.id)) ? cardTypeSel.get(item.id) : '';
+  let look = item;
+  async function currentLook(){
+    const t = types.find(x => x.id === typeSel.value);
+    if (!t) return types.length && item.mainTypeName ? Object.assign({}, item, { name: item.name + ' ' + item.mainTypeName }) : item;
+    return Object.assign({}, item, { id: item.id + '~' + t.id, name: item.name + ' ' + t.name, thumb: t.thumb, dataUrl: await fetchTypePhoto(currentCatalogueId, item, t) });
+  }
+  const fileName = () => (look.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-offer.jpg';
   async function render(){
     const my = ++runId;
+    look = await currentLook();
+    if (my !== runId) return;
     const pct = Math.min(99, Math.max(1, parseInt(pctInput.value, 10) || 50));
     try { localStorage.setItem('shopapp-ad-offer', String(pct)); } catch (e) {}
     status.textContent = '⏳ Making image...'; blob = null;
@@ -2084,8 +2100,8 @@ function openAdMaker(item){
     syncSizeVisibility();
     const shopInfo = await getAdShopInfo();
     const canvas = styleSel.value === 'premium'
-      ? await buildAdImagePremium(item, pct, shopInfo, sizeSel.value)
-      : await buildAdImage(item, pct, shopInfo);
+      ? await buildAdImagePremium(look, pct, shopInfo, sizeSel.value)
+      : await buildAdImage(look, pct, shopInfo);
     if (my !== runId) return;
     blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
     if (my !== runId) return;
@@ -2095,16 +2111,17 @@ function openAdMaker(item){
   pctInput.onchange = render;
   styleSel.onchange = render;
   sizeSel.onchange = render;
+  typeSel.onchange = render;
   adModal.querySelector('.ad-download').onclick = () => {
     if (!blob) return;
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName();
     document.body.appendChild(a); a.click(); a.remove();
   };
   adModal.querySelector('.ad-share').onclick = async () => {
     if (!blob) return;
-    const file = new File([blob], fileName, { type: 'image/jpeg' });
+    const file = new File([blob], fileName(), { type: 'image/jpeg' });
     try {
-      if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: item.name }); return; }
+      if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: look.name }); return; }
     } catch (e) { if (e && e.name === 'AbortError') return; }
     adModal.querySelector('.ad-download').onclick();
     alert('Sharing is not available here, so the image was downloaded. Send it from your Gallery/Downloads.');
