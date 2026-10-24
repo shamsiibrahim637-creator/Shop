@@ -954,6 +954,10 @@ window.__switchView = function(){};
           <label>Address</label>
           <input type="text" id="shop-address" placeholder="Shop address">
         </div>
+        <div class="field">
+          <label>Your GST Number (optional)</label>
+          <input type="text" id="shop-gstin" placeholder="e.g. 27ABCDE1234F1Z5" maxlength="15">
+        </div>
       </div>
       <button type="button" id="save-shop-btn" class="btn btn-gold btn-full">Save Shop Details</button>
     </div>
@@ -1015,6 +1019,10 @@ window.__switchView = function(){};
         <label>Bill Made By</label>
         <input type="text" id="bill-made-by" placeholder="Your name">
       </div>
+    </div>
+    <div class="field">
+      <label>Customer GST Number (optional)</label>
+      <input type="text" id="customer-gstin" placeholder="e.g. 27ABCDE1234F1Z5" maxlength="15">
     </div>
 
     <div class="tabs">
@@ -1187,6 +1195,7 @@ function formatDateDMY(dateStr){
 const shopNameInput = document.getElementById('shop-name');
 const shopPhoneInput = document.getElementById('shop-phone');
 const shopAddressInput = document.getElementById('shop-address');
+const shopGstinInput = document.getElementById('shop-gstin');
 const headerShopname = document.getElementById('header-shopname');
 const saveShopBtn = document.getElementById('save-shop-btn');
 
@@ -1198,6 +1207,7 @@ const billDateInput = document.getElementById('bill-date');
 const customerNameInput = document.getElementById('customer-name');
 const customerPhoneInput = document.getElementById('customer-phone');
 const customerAddressInput = document.getElementById('customer-address');
+const customerGstinInput = document.getElementById('customer-gstin');
 const billMadeByInput = document.getElementById('bill-made-by');
 const customerPickerSearch = document.getElementById('customer-picker-search');
 const customerPickerResults = document.getElementById('customer-picker-results');
@@ -1310,7 +1320,7 @@ const editShopBtn = document.getElementById('edit-shop-btn');
 
 function showShopSummary(){
   summaryShopName.textContent = shopSettings.name || '(no shop name set)';
-  summaryShopContact.textContent = [shopSettings.phone, shopSettings.address].filter(Boolean).join('  •  ');
+  summaryShopContact.textContent = [shopSettings.phone, shopSettings.address, shopSettings.gstin ? 'GSTIN: ' + shopSettings.gstin : ''].filter(Boolean).join('  •  ');
   shopDetailsForm.style.display = 'none';
   shopDetailsSummary.style.display = 'block';
 }
@@ -1329,6 +1339,7 @@ async function loadShopSettings(){
   shopNameInput.value = shopSettings.name || '';
   shopPhoneInput.value = shopSettings.phone || '';
   shopAddressInput.value = shopSettings.address || '';
+  shopGstinInput.value = shopSettings.gstin || '';
   headerShopname.textContent = shopSettings.name ? shopSettings.name : 'Set up your shop name below to get started';
 
   // If details are already saved, keep the form tucked away by default so it
@@ -1343,7 +1354,8 @@ saveShopBtn.addEventListener('click', async () => {
   shopSettings = {
     name: shopNameInput.value.trim(),
     phone: shopPhoneInput.value.trim(),
-    address: shopAddressInput.value.trim()
+    address: shopAddressInput.value.trim(),
+    gstin: shopGstinInput.value.trim().toUpperCase()
   };
   await storage.set('shop-settings', JSON.stringify(shopSettings));
   headerShopname.textContent = shopSettings.name || 'Set up your shop name below to get started';
@@ -1538,8 +1550,8 @@ mergeBackupFile.addEventListener('change', async (e) => {
       let changed = false;
       let oldCustomers = [];
       try { oldCustomers = (JSON.parse(backup.entries['saved-customers'] || '{}').customers) || []; } catch (err) {}
-      oldCustomers.forEach(c => { if (upsertCustomer(savedCustomers, c.name, c.phone, c.address, 0)) changed = true; });
-      oldBills.forEach(b => { if (b && upsertCustomer(savedCustomers, b.customerName, b.customerPhone, b.customerAddress, 0)) changed = true; });
+      oldCustomers.forEach(c => { if (upsertCustomer(savedCustomers, c.name, c.phone, c.address, 0, c.gstin)) changed = true; });
+      oldBills.forEach(b => { if (b && upsertCustomer(savedCustomers, b.customerName, b.customerPhone, b.customerAddress, 0, b.customerGstin)) changed = true; });
       if (changed) await saveCustomersToCloud();
     }
     alert('✅ Added ' + added.length + ' old bill(s)' + (skipped ? ' (' + skipped + ' were already here, skipped)' : '') + '.\nThe app will now reload.');
@@ -1943,6 +1955,7 @@ function resetBillForm(nextInvoiceNoValue){
   customerNameInput.value = '';
   customerPhoneInput.value = '';
   customerAddressInput.value = '';
+  customerGstinInput.value = '';
   discountPercentInput.value = 50;
   gstEnabledInput.checked = false;
   gstPercentInput.value = 0;
@@ -1980,6 +1993,7 @@ saveBillBtn.addEventListener('click', async () => {
     customerName: customerNameInput.value.trim(),
     customerPhone: customerPhoneInput.value.trim(),
     customerAddress: customerAddressInput.value.trim(),
+    customerGstin: customerGstinInput.value.trim().toUpperCase(),
     billMadeBy: billMadeByInput.value.trim(),
     items: currentItems.slice(),
     subtotal,
@@ -2032,7 +2046,7 @@ saveBillBtn.addEventListener('click', async () => {
     // Remember this customer in the separate customer list (a hiccup here
     // never blocks or fails the bill save itself).
     if (!customersLoaded) await loadSavedCustomers();
-    if (customersLoaded && upsertCustomer(savedCustomers, bill.customerName, bill.customerPhone, bill.customerAddress, Date.now())){
+    if (customersLoaded && upsertCustomer(savedCustomers, bill.customerName, bill.customerPhone, bill.customerAddress, Date.now(), bill.customerGstin)){
       writes.push(saveCustomersToCloud().catch(e => console.error('Customer list not updated:', e)));
     }
     await Promise.all(writes);
@@ -2110,6 +2124,7 @@ function buildBillPDFDoc(bill){
   doc.setTextColor(90,90,90);
   const shopLine = [shopSettings.address, shopSettings.phone].filter(Boolean).join('   |   ');
   if (shopLine){ doc.text(shopLine, pageWidth/2, y, { align: 'center' }); y += 6; }
+  if (shopSettings.gstin){ doc.setFont('helvetica', 'bold'); doc.setTextColor(40,40,40); doc.text('GSTIN: ' + shopSettings.gstin, pageWidth/2, y, { align: 'center' }); doc.setFont('helvetica', 'normal'); y += 6; }
 
   y += 4;
   doc.setDrawColor(180,145,47);
@@ -2130,6 +2145,7 @@ function buildBillPDFDoc(bill){
   if (bill.billMadeBy){ doc.text('Prepared By: ' + bill.billMadeBy, pageWidth-15, y, { align: 'right' }); }
   if (bill.customerName || bill.billMadeBy) y += 6;
   if (bill.customerPhone){ doc.text('Phone: ' + bill.customerPhone, 15, y); y += 6; }
+  if (bill.customerGstin){ doc.setFont('helvetica', 'bold'); doc.text('Customer GSTIN: ' + bill.customerGstin, 15, y); doc.setFont('helvetica', 'normal'); y += 6; }
   if (bill.customerAddress){
     const addrLines = doc.splitTextToSize('Address: ' + bill.customerAddress, pageWidth - 30);
     doc.text(addrLines, 15, y);
@@ -2373,6 +2389,7 @@ function buildCurrentDraftBill(){
     customerName: customerNameInput.value.trim(),
     customerPhone: customerPhoneInput.value.trim(),
     customerAddress: customerAddressInput.value.trim(),
+    customerGstin: customerGstinInput.value.trim().toUpperCase(),
     billMadeBy: billMadeByInput.value.trim(),
     items: currentItems.slice(),
     subtotal, discountPercent, discountAmount, packingAuto, packing, gstEnabled, gstPercent, gstAmount, transportName, total
@@ -2400,7 +2417,9 @@ function buildEstimateText(bill){
   const lines = [];
   if (shopSettings.name) lines.push('*' + shopSettings.name + '*');
   lines.push('*Order Estimate #' + bill.invoiceNo + '*  (' + formatDateDMY(bill.date) + ')');
+  if (shopSettings.gstin) lines.push('GSTIN: ' + shopSettings.gstin);
   if (bill.customerName) lines.push('Customer: ' + bill.customerName);
+  if (bill.customerGstin) lines.push('Customer GSTIN: ' + bill.customerGstin);
   lines.push('');
   (bill.items || []).forEach((it, idx) => {
     const amt = (parseFloat(it.qty) || 0) * (parseFloat(it.rate) || 0);
@@ -2521,13 +2540,13 @@ function customerKeyOf(name, phone){
 
 // Adds or updates a customer in the list (newer details win, but an empty
 // field never wipes out a previously saved one).
-function upsertCustomer(list, name, phone, address, updatedAt){
-  name = (name || '').trim(); phone = (phone || '').trim(); address = (address || '').trim();
+function upsertCustomer(list, name, phone, address, updatedAt, gstin){
+  name = (name || '').trim(); phone = (phone || '').trim(); address = (address || '').trim(); gstin = (gstin || '').trim();
   if (!name && !phone) return false;
   const key = customerKeyOf(name, phone);
   const idx = list.findIndex(c => customerKeyOf(c.name, c.phone) === key);
   if (idx === -1){
-    list.push({ name, phone, address, updatedAt });
+    list.push(gstin ? { name, phone, address, gstin, updatedAt } : { name, phone, address, updatedAt });
     return true;
   }
   const c = list[idx];
@@ -2538,6 +2557,8 @@ function upsertCustomer(list, name, phone, address, updatedAt){
     address: (newer ? address || c.address : c.address || address),
     updatedAt: Math.max(updatedAt, c.updatedAt || 0)
   };
+  const g = newer ? gstin || c.gstin : c.gstin || gstin;
+  if (g) list[idx].gstin = g;
   return true;
 }
 
@@ -2559,7 +2580,7 @@ async function loadSavedCustomers(){
   // into the new list (oldest bill first, so the latest details win).
   if (!billsLoadOk) return; // bills didn't load — don't build the list from nothing
   const list = [];
-  bills.slice().reverse().forEach(b => upsertCustomer(list, b.customerName, b.customerPhone, b.customerAddress, b.id || 0));
+  bills.slice().reverse().forEach(b => upsertCustomer(list, b.customerName, b.customerPhone, b.customerAddress, b.id || 0, b.customerGstin));
   savedCustomers = list;
   customersLoaded = true;
   if (list.length){
@@ -2619,6 +2640,7 @@ function renderCustomerPickerResults(){
       customerNameInput.value = c.name;
       customerPhoneInput.value = c.phone;
       customerAddressInput.value = c.address;
+      customerGstinInput.value = c.gstin || '';
       customerPickerSearch.value = '';
       customerPickerResults.innerHTML = '';
       billStatusMsg.textContent = 'Loaded saved details for ' + (c.name || 'this customer') + '.';
@@ -2707,6 +2729,7 @@ function renderBillsList(){
       customerNameInput.value = bill.customerName;
       customerPhoneInput.value = bill.customerPhone;
       customerAddressInput.value = bill.customerAddress || '';
+      customerGstinInput.value = bill.customerGstin || '';
       billMadeByInput.value = bill.billMadeBy || '';
       currentItems = bill.items.map(i => ({ ...i }));
       discountPercentInput.value = (bill.discountPercent !== undefined) ? bill.discountPercent : 50;
