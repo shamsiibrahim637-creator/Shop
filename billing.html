@@ -2154,8 +2154,9 @@ function buildBillPDFDoc(bill){
     doc.setTextColor(240,195,65);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
-    doc.text('PHOTO', 18, yPos+6);
-    doc.text('ITEM', 42, yPos+6);
+    doc.text('S.NO', 17, yPos+6);
+    doc.text('PHOTO', 28, yPos+6);
+    doc.text('ITEM', 50, yPos+6);
     doc.text('SIZE', 108, yPos+6);
     doc.text('QTY', 138, yPos+6);
     doc.text('RATE', 158, yPos+6);
@@ -2182,28 +2183,32 @@ function buildBillPDFDoc(bill){
     }
     const amount = item.qty * item.rate;
 
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.text(String(idx + 1), 21, y+14, { align: 'center' });
+    doc.setFont('helvetica', 'normal');
     if (item.photo){
-      try { doc.addImage(item.photo, 'JPEG', 17, y+2, 20, 20); } catch (e) { /* skip if image can't be embedded */ }
+      try { doc.addImage(item.photo, 'JPEG', 27, y+2, 20, 20); } catch (e) { /* skip if image can't be embedded */ }
     } else {
       doc.setDrawColor(210,210,210);
-      doc.rect(17, y+2, 20, 20);
+      doc.rect(27, y+2, 20, 20);
     }
 
     doc.setFontSize(10);
     // Cap every column's text to the space actually available before the
     // next column starts, so a long product name or size label wraps
     // instead of running into the numbers beside it.
-    const nameLines = doc.splitTextToSize(item.name, 60).slice(0, 2);
+    const nameLines = doc.splitTextToSize(item.name, 55).slice(0, 2);
     if (item.tagColor && item.catalogue){
       const n = parseInt(String(item.tagColor).replace('#', ''), 16);
       doc.setTextColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
-      doc.text(nameLines, 42, y+9);
+      doc.text(nameLines, 50, y+9);
       doc.setFontSize(8);
-      doc.text('[' + String(item.catalogue).toUpperCase() + ']', 42, y + 9 + nameLines.length * 4.4);
+      doc.text('[' + String(item.catalogue).toUpperCase() + ']', 50, y + 9 + nameLines.length * 4.4);
       doc.setFontSize(10);
       doc.setTextColor(20,20,20);
     } else {
-      doc.text(nameLines, 42, y+9);
+      doc.text(nameLines, 50, y+9);
     }
     const sizeLines = doc.splitTextToSize(String(item.size || '-'), 26).slice(0, 2);
     doc.text(sizeLines, 108, y+11);
