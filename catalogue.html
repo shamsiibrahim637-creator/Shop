@@ -1052,6 +1052,11 @@ window.__switchView = function(){};
       <button id="export-photos-btn" disabled title="Export all Photos" style="flex:1; background:none; border:1.5px solid var(--brass); color:var(--brass-light); border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px;"><span style="font-size:18px;">📷</span><span style="font-size:10px;">Photos</span></button>
       <button id="export-oos-btn" title="Export Out of Stock List" style="flex:1; background:none; border:1.5px solid #e0705a; color:#e0705a; border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px;"><span style="font-size:18px;">📋</span><span style="font-size:9px; line-height:1.1;">Out of<br>Stock</span></button>
     </div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="drive-save-btn" style="flex:4; background:#1a73e8; color:#fff; border:none; border-radius:8px; padding:12px; font-family:Arial,sans-serif; font-weight:800; font-size:15px; cursor:pointer;">☁️ Save PDF to Google Drive</button>
+      <button type="button" id="drive-setup-btn" title="Google Drive setup" style="flex:1; background:none; border:1.5px solid #1a73e8; color:#8ab4f8; border-radius:8px; padding:8px 4px; font-family:Arial,sans-serif; font-weight:800; font-size:12px; cursor:pointer;">⚙️ Drive</button>
+    </div>
+    <div id="drive-info" data-nocaps style="font-family:Arial,sans-serif; font-size:13px; color:#c9c9c9; margin-top:6px; line-height:1.5;"></div>
     <div id="status"></div>
   </div>
 </div>
@@ -1215,6 +1220,7 @@ async function switchCatalogue(catId){
   renderCatalogueSelect();
   await loadItemsFromStorage(false);
   attachCatalogueItemsListener(catId);
+  try { refreshDriveInfo(); } catch (e) {}
 }
 
 // ---- Live sync: pick up changes made on another phone automatically ----
@@ -4022,7 +4028,9 @@ function escapeHtml(str){
   return div.innerHTML;
 }
 
+let pdfToDrive = null;
 exportBtn.addEventListener('click', async () => {
+  const driveJob = pdfToDrive; pdfToDrive = null; // set when the PDF is going to Google Drive instead of Downloads
   const hasAnyStock = items.some(item => {
     if (item.outOfStock) return false;
     if (item.variations && item.variations.length > 0){
@@ -4032,6 +4040,7 @@ exportBtn.addEventListener('click', async () => {
   });
   if (!hasAnyStock){
     alert('Every product (and every size) in this catalogue is currently marked Out of Stock, so there\'s nothing to export. Restock at least one item first.');
+    if (driveJob) driveJob.fail(new Error('Nothing in stock to put in the PDF'));
     return;
   }
   exportBtn.disabled = true;
@@ -4195,15 +4204,172 @@ exportBtn.addEventListener('click', async () => {
 
     const currentCat = catalogues.find(c => c.id === currentCatalogueId);
     const safeName = (currentCat ? currentCat.name : 'trophy-catalogue').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-    doc.save(safeName + '.pdf');
-    statusEl.textContent = items.length + ' item(s) exported successfully.';
+    if (driveJob){ driveJob.ok(doc.output('blob'), (currentCat ? currentCat.name : 'Trophy Catalogue') + '.pdf', currentCat); statusEl.textContent = ''; }
+    else { doc.save(safeName + '.pdf'); statusEl.textContent = items.length + ' item(s) exported successfully.'; }
   } catch (err) {
     console.error(err);
     statusEl.textContent = 'Something went wrong generating the PDF.';
+    if (driveJob) driveJob.fail(err);
   } finally {
     exportBtn.disabled = false;
   }
 });
+
+// ===================== ☁️ Save the catalogue PDF to Google Drive =====================
+// Each catalogue keeps ONE file in your Drive. Saving again replaces that
+// file's contents, so the link you shared with customers never changes.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const driveSaveBtn = document.getElementById('drive-save-btn');
+const driveInfoEl = document.getElementById('drive-info');
+let driveClientId = '', driveTokenClient = null, driveToken = null, driveTokenExp = 0;
+let driveTokenWaiter = null;
+const driveKey = (catId) => 'drive-pdf:' + catId;
+function loadGis(){
+  return new Promise((res, rej) => {
+    const ready = () => window.google && google.accounts && google.accounts.oauth2;
+    if (ready()) return res();
+    if (!document.getElementById('gis-script')){
+      const sc = document.createElement('script'); sc.id = 'gis-script'; sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
+      document.head.appendChild(sc);
+    }
+    let n = 0; const t = setInterval(() => { if (ready()){ clearInterval(t); res(); } else if (++n > 150){ clearInterval(t); rej(new Error('Could not reach Google — check the internet')); } }, 100);
+  });
+}
+function ensureTokenClient(){
+  if (driveTokenClient) return true;
+  if (!driveClientId || !(window.google && google.accounts && google.accounts.oauth2)) return false;
+  driveTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: driveClientId, scope: DRIVE_SCOPE,
+    callback: (r) => { const w = driveTokenWaiter; driveTokenWaiter = null; if (!w) return;
+      if (r && r.access_token){ driveToken = r.access_token; driveTokenExp = Date.now() + (Number(r.expires_in) || 3600) * 1000; w.res(driveToken); }
+      else w.rej(new Error((r && (r.error_description || r.error)) || 'Google sign-in failed')); },
+    error_callback: (e) => { const w = driveTokenWaiter; driveTokenWaiter = null; if (w) w.rej(new Error(e && e.type === 'popup_closed' ? 'The Google sign-in window was closed' : (e && e.type === 'popup_failed_to_open' ? 'The Google sign-in window was blocked — allow pop-ups and try again' : 'Google sign-in failed'))); }
+  });
+  return true;
+}
+function getDriveToken(){ // must be called straight from the button tap (opens Google's window)
+  if (driveToken && Date.now() < driveTokenExp - 120000) return Promise.resolve(driveToken);
+  return new Promise((res, rej) => { driveTokenWaiter = { res, rej }; driveTokenClient.requestAccessToken({ prompt: '' }); });
+}
+async function driveFetch(url, opts){
+  const r = await fetch(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + driveToken }, (opts && opts.headers) || {}) }));
+  if (r.status === 401){ driveToken = null; throw new Error('Google sign-in expired — tap the button again'); }
+  return r;
+}
+function driveMultipart(meta, blob){
+  const b = 'tpt' + Date.now();
+  return { headers: { 'Content-Type': 'multipart/related; boundary=' + b },
+    body: new Blob(['--' + b + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(meta) + '\r\n--' + b + '\r\nContent-Type: application/pdf\r\n\r\n', blob, '\r\n--' + b + '--'], { type: 'multipart/related; boundary=' + b }) };
+}
+async function uploadPdfToDrive(blob, name, cat){
+  let saved = null;
+  try { const r = await storage.get(driveKey(cat.id)); saved = r && r.value ? JSON.parse(r.value) : null; } catch (e) {}
+  let note = '';
+  if (saved && saved.fileId){
+    const mp = driveMultipart({ name }, blob);
+    const r = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + encodeURIComponent(saved.fileId) + '?uploadType=multipart&fields=id,webViewLink,trashed', { method: 'PATCH', headers: mp.headers, body: mp.body });
+    if (r.ok){
+      const j = await r.json();
+      if (!j.trashed){ saved.link = j.webViewLink || saved.link; saved.updated = Date.now(); await storage.set(driveKey(cat.id), JSON.stringify(saved)); return Object.assign({ replaced: true }, saved); }
+      note = 'The old Drive file was in the Bin, so a new file was made — please share this NEW link.';
+    } else if (r.status === 404 || r.status === 403){
+      note = 'The old Drive file was deleted, so a new file was made — please share this NEW link.';
+    } else {
+      throw new Error('Google Drive said: ' + r.status + ' ' + (await r.text()).slice(0, 160));
+    }
+  }
+  const mp = driveMultipart({ name, mimeType: 'application/pdf' }, blob);
+  const r = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', { method: 'POST', headers: mp.headers, body: mp.body });
+  if (!r.ok) throw new Error('Google Drive said: ' + r.status + ' ' + (await r.text()).slice(0, 160));
+  const j = await r.json();
+  // anyone with the link can view (needed for customers)
+  const pr = await driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(j.id) + '/permissions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'reader', type: 'anyone' }) });
+  if (!pr.ok) note = (note ? note + ' ' : '') + 'Could not make it public automatically — in Drive, set Share → "Anyone with the link".';
+  const info = { fileId: j.id, link: j.webViewLink || ('https://drive.google.com/file/d/' + j.id + '/view'), updated: Date.now() };
+  await storage.set(driveKey(cat.id), JSON.stringify(info));
+  return Object.assign({ created: true, note }, info);
+}
+function makePdfBlobForDrive(){
+  return new Promise((ok, fail) => {
+    if (exportBtn.disabled){ fail(new Error(items.length ? 'A PDF is already being made — wait a moment' : 'This catalogue has no products yet')); return; }
+    pdfToDrive = { ok: (blob, name, cat) => ok({ blob, name, cat }), fail };
+    exportBtn.click();
+  });
+}
+function fmtWhen(ts){ if (!ts) return ''; const d = new Date(ts); return d.toLocaleDateString('en-IN') + ' ' + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); }
+function renderDriveInfo(info, extra){
+  if (!info || !info.link){ driveInfoEl.innerHTML = extra ? '<span style="color:#8ab4f8;">' + escapeHtml(extra) + '</span>' : ''; return; }
+  driveInfoEl.innerHTML = (extra ? '<div style="color:#7cd992; font-weight:800;">' + escapeHtml(extra) + '</div>' : '') +
+    '🔗 Customer link (never changes): <a href="' + escapeHtml(info.link) + '" target="_blank" rel="noopener" style="color:#8ab4f8; word-break:break-all;">' + escapeHtml(info.link) + '</a>' +
+    (info.updated ? '<div style="color:#8a8a8a; font-size:12px;">Last updated: ' + escapeHtml(fmtWhen(info.updated)) + '</div>' : '') +
+    '<div style="display:flex; gap:6px; margin-top:6px;"><button type="button" class="drive-copy" style="flex:1; background:none; border:1.5px solid #1a73e8; color:#8ab4f8; border-radius:6px; padding:8px; font-weight:800; font-size:13px;">📋 Copy link</button><button type="button" class="drive-share" style="flex:1; background:#25d366; border:none; color:#000; border-radius:6px; padding:8px; font-weight:800; font-size:13px;">📤 Share link</button></div>';
+  const c = driveInfoEl.querySelector('.drive-copy'), sh = driveInfoEl.querySelector('.drive-share');
+  if (c) c.onclick = async () => { try { await navigator.clipboard.writeText(info.link); c.textContent = '✅ Copied'; } catch (e) { prompt('Copy this link:', info.link); } };
+  if (sh) sh.onclick = async () => { const cat = catalogues.find(x => x.id === currentCatalogueId); const text = (cat ? cat.name + ' catalogue' : 'Our catalogue') + ': ' + info.link; try { if (navigator.share){ await navigator.share({ text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; } window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank'); };
+}
+async function refreshDriveInfo(){
+  if (!driveClientId){ renderDriveInfo(null, ''); return; }
+  try { const r = await storage.get(driveKey(currentCatalogueId)); renderDriveInfo(r && r.value ? JSON.parse(r.value) : null, ''); } catch (e) { renderDriveInfo(null, ''); }
+}
+driveSaveBtn.addEventListener('click', () => {
+  if (!driveClientId){ openDriveSetup(); return; }
+  if (!ensureTokenClient()){ renderDriveInfo(null, '⏳ Connecting to Google… tap the button again in a few seconds.'); loadGis().then(ensureTokenClient).then(() => renderDriveInfo(null, '✅ Ready — tap "Save PDF to Google Drive" again.')).catch(e => renderDriveInfo(null, '⚠️ ' + e.message)); return; }
+  const tokenP = getDriveToken(); // opens Google's window right away (needs the tap)
+  driveSaveBtn.disabled = true;
+  renderDriveInfo(null, '⏳ Signing in to Google…');
+  tokenP.then(async () => {
+    renderDriveInfo(null, '⏳ Making the PDF…');
+    const { blob, name, cat } = await makePdfBlobForDrive();
+    renderDriveInfo(null, '⏳ Uploading to Google Drive…');
+    const info = await uploadPdfToDrive(blob, name, cat);
+    if (cat && cat.id === currentCatalogueId) renderDriveInfo(info, (info.replaced ? '✅ Drive file updated — same link as before.' : '✅ Saved to your Google Drive.') + (info.note ? ' ' + info.note : ''));
+  }).catch(e => { console.error(e); renderDriveInfo(null, '⚠️ ' + (e && e.message ? e.message : e)); refreshDriveInfoLater(); })
+    .finally(() => { driveSaveBtn.disabled = false; });
+});
+function refreshDriveInfoLater(){ setTimeout(() => { if (/^⚠️/.test(driveInfoEl.textContent)) return; refreshDriveInfo(); }, 100); }
+// ---- one-time setup: paste the Client ID from Google Cloud ----
+let driveModal = null;
+function openDriveSetup(){
+  if (!driveModal){
+    driveModal = document.createElement('div');
+    driveModal.setAttribute('data-nocaps', '');
+    driveModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); display:none; flex-direction:column; align-items:center; overflow:auto; padding:16px; font-family:Arial,sans-serif; color:#eee;';
+    driveModal.innerHTML = `<div style="width:100%; max-width:480px;">
+      <div style="font-weight:900; font-size:18px; color:#8ab4f8; margin-bottom:8px;">☁️ Google Drive setup (one time)</div>
+      <div style="font-size:13px; line-height:1.55; color:#cfcfcf;">Paste the <b>Client ID</b> you made in Google Cloud. It looks like<br><span style="color:#8ab4f8;">1234567890-abc123.apps.googleusercontent.com</span></div>
+      <input type="text" class="dm-id" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Client ID" style="width:100%; margin-top:10px; padding:11px; border-radius:6px; border:1.5px solid #1a73e8; background:#111; color:#fff; font-size:14px; font-weight:700;">
+      <div class="dm-msg" style="color:#e0705a; font-weight:800; font-size:13px; min-height:18px; margin-top:6px;"></div>
+      <div style="display:flex; gap:8px; margin-top:6px;">
+        <button type="button" class="dm-save" style="flex:2; padding:13px; border:none; border-radius:8px; background:#1a73e8; color:#fff; font-weight:900; font-size:15px;">💾 Save</button>
+        <button type="button" class="dm-close" style="flex:1; padding:13px; border:1.5px solid #555; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:14px;">Close</button>
+      </div>
+      <div style="font-size:12px; color:#9a9a9a; line-height:1.5; margin-top:14px;">The app can only see and change the PDF files it saves itself — nothing else in your Drive. Your PDF is shared as "anyone with the link can view" so customers can open it.</div>
+    </div>`;
+    document.body.appendChild(driveModal);
+    driveModal.querySelector('.dm-close').onclick = () => { driveModal.style.display = 'none'; document.body.style.overflow = ''; };
+    driveModal.querySelector('.dm-save').onclick = async () => {
+      const v = driveModal.querySelector('.dm-id').value.trim();
+      const msg = driveModal.querySelector('.dm-msg');
+      if (v && !/^[0-9]+-[a-z0-9_]+\.apps\.googleusercontent\.com$/i.test(v)){ msg.textContent = 'That does not look like a Client ID — it must end with .apps.googleusercontent.com'; return; }
+      try { await storage.set('drive-client-id', v); } catch (e) { msg.textContent = 'Could not save — check internet.'; return; }
+      driveClientId = v; driveTokenClient = null; driveToken = null;
+      try { localStorage.setItem('shopapp-drive-client-id', v); } catch (e) {}
+      driveModal.style.display = 'none'; document.body.style.overflow = '';
+      if (v){ loadGis().then(ensureTokenClient).catch(() => null); renderDriveInfo(null, '✅ Drive is set up — tap "Save PDF to Google Drive".'); }
+      else renderDriveInfo(null, '');
+    };
+  }
+  driveModal.querySelector('.dm-id').value = driveClientId;
+  driveModal.querySelector('.dm-msg').textContent = '';
+  driveModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
+}
+document.getElementById('drive-setup-btn').addEventListener('click', openDriveSetup);
+(async function initDrive(){
+  try { driveClientId = localStorage.getItem('shopapp-drive-client-id') || ''; } catch (e) {}
+  try { const r = await storage.get('drive-client-id'); if (r && r.value != null){ driveClientId = r.value; try { localStorage.setItem('shopapp-drive-client-id', driveClientId); } catch (e) {} } } catch (e) {}
+  if (driveClientId){ loadGis().then(ensureTokenClient).catch(() => null); }
+  refreshDriveInfo();
+})();
 
 const exportOosBtn = document.getElementById('export-oos-btn');
 exportOosBtn.addEventListener('click', async () => {
