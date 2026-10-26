@@ -1405,10 +1405,10 @@ async function readCloudCatalogueProducts(onBatch){
         if (item.outOfStock) return;
         const vars = item.variations && item.variations.length ? item.variations : [{}];
         // a product with types (e.g. AC-42 BEST BATSMAN / BEST BOWLER) shows each type separately
-        const looks = [{ name: item.name + (Array.isArray(item.types) && item.types.length && item.mainTypeName ? ' ' + item.mainTypeName : ''), photo: item.thumb || item.dataUrl || '' }]
-          .concat((Array.isArray(item.types) ? item.types : []).filter(t => t && t.name).map(t => ({ name: item.name + ' ' + t.name, photo: t.thumb || item.thumb || '' })));
+        const looks = [{ name: item.name + (Array.isArray(item.types) && item.types.length && item.mainTypeName ? ' ' + item.mainTypeName : ''), photo: item.thumb || item.dataUrl || '', vars }]
+          .concat((Array.isArray(item.types) ? item.types : []).filter(t => t && t.name).map(t => ({ name: item.name + ' ' + t.name, photo: t.thumb || item.thumb || '', vars: Array.isArray(t.variations) && t.variations.length ? t.variations : vars })));
         const out = [];
-        looks.forEach(lk => vars.filter(v => !v.outOfStock).forEach(v => out.push({ name: lk.name, code: v.code || '', inch: v.inch || '', dim: v.dim || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: lk.photo })));
+        looks.forEach(lk => lk.vars.filter(v => !v.outOfStock).forEach(v => out.push({ name: lk.name, code: v.code || '', inch: v.inch || '', dim: v.dim || '', price: v.price || '', catalogueName: cat.name, tagColor: cat.tagColor || '', photo: lk.photo })));
         products.push(...out);
         if (onBatch && out.length){ try { onBatch(out); } catch (e) {} }
       })));

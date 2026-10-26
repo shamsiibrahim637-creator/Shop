@@ -414,6 +414,9 @@ function itemPhoto(item){ return (item && (item.thumb || item.dataUrl)) || ''; }
 // record and its full photo in its own record "photo:<catalogue>:<id>~<type>".
 const typePhotoKey = (catId, itemId, typeId) => photoKey(catId, itemId + '~' + typeId);
 function itemTypes(item){ return Array.isArray(item && item.types) ? item.types.filter(t => t && t.id) : []; }
+// A type can have its own sizes & prices (e.g. a bigger base); otherwise it uses the product's sizes.
+function typeHasOwnSizes(t){ return !!(t && Array.isArray(t.variations) && t.variations.length); }
+function typeVariations(item, t){ return typeHasOwnSizes(t) ? t.variations : ((item && item.variations) || []); }
 async function fetchTypePhoto(catId, item, t){
   if (t.dataUrl) return t.dataUrl;
   const k = typePhotoKey(catId, item.id, t.id);
@@ -433,7 +436,7 @@ async function expandTypes(list, catId){
     if (!ts.length){ out.push(it); continue; }
     out.push(Object.assign({}, it, { name: it.name + (it.mainTypeName ? ' ' + it.mainTypeName : '') }));
     const photos = await Promise.all(ts.map(t => fetchTypePhoto(catId, it, t)));
-    ts.forEach((t, i) => out.push(Object.assign({}, it, { id: it.id + '~' + t.id, name: it.name + ' ' + t.name, thumb: t.thumb, dataUrl: photos[i], types: undefined, mainTypeName: undefined })));
+    ts.forEach((t, i) => out.push(Object.assign({}, it, { id: it.id + '~' + t.id, name: it.name + ' ' + t.name, thumb: t.thumb, dataUrl: photos[i], variations: typeVariations(it, t), types: undefined, mainTypeName: undefined })));
   }
   return out;
 }

@@ -1567,6 +1567,9 @@ function itemPhoto(item){ return (item && (item.thumb || item.dataUrl)) || ''; }
 // record and its full photo in its own record "photo:<catalogue>:<id>~<type>".
 const typePhotoKey = (catId, itemId, typeId) => photoKey(catId, itemId + '~' + typeId);
 function itemTypes(item){ return Array.isArray(item && item.types) ? item.types.filter(t => t && t.id) : []; }
+// A type can have its own sizes & prices (e.g. a bigger base); otherwise it uses the product's sizes.
+function typeHasOwnSizes(t){ return !!(t && Array.isArray(t.variations) && t.variations.length); }
+function typeVariations(item, t){ return typeHasOwnSizes(t) ? t.variations : ((item && item.variations) || []); }
 async function fetchTypePhoto(catId, item, t){
   if (t.dataUrl) return t.dataUrl;
   const k = typePhotoKey(catId, item.id, t.id);
@@ -1586,7 +1589,7 @@ async function expandTypes(list, catId){
     if (!ts.length){ out.push(it); continue; }
     out.push(Object.assign({}, it, { name: it.name + (it.mainTypeName ? ' ' + it.mainTypeName : '') }));
     const photos = await Promise.all(ts.map(t => fetchTypePhoto(catId, it, t)));
-    ts.forEach((t, i) => out.push(Object.assign({}, it, { id: it.id + '~' + t.id, name: it.name + ' ' + t.name, thumb: t.thumb, dataUrl: photos[i], types: undefined, mainTypeName: undefined })));
+    ts.forEach((t, i) => out.push(Object.assign({}, it, { id: it.id + '~' + t.id, name: it.name + ' ' + t.name, thumb: t.thumb, dataUrl: photos[i], variations: typeVariations(it, t), types: undefined, mainTypeName: undefined })));
   }
   return out;
 }
@@ -2073,10 +2076,14 @@ function openAdMaker(item){
   const styleSel = adModal.querySelector('.ad-style');
   const sizeSel = adModal.querySelector('.ad-size');
   try { styleSel.value = localStorage.getItem('shopapp-ad-style') || 'premium'; } catch (e) { styleSel.value = 'premium'; }
-  const inStock = (item.variations || []).filter(v => !v.outOfStock && (v.code || v.inch || v.price));
-  sizeSel.innerHTML = inStock.map((v, k) => '<option value="' + k + '">Size ' + escapeHtml([v.code, v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ')) + '</option>').join('') +
-    (inStock.length > 1 ? '<option value="all">All sizes</option>' : '');
-  sizeSel.value = inStock.length > 1 ? 'all' : '0';
+  let inStock = [];
+  const fillSizes = (vars) => {
+    inStock = (vars || []).filter(v => !v.outOfStock && (v.code || v.inch || v.price));
+    sizeSel.innerHTML = inStock.map((v, k) => '<option value="' + k + '">Size ' + escapeHtml([v.code, v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' · ')) + '</option>').join('') +
+      (inStock.length > 1 ? '<option value="all">All sizes</option>' : '');
+    sizeSel.value = inStock.length > 1 ? 'all' : '0';
+  };
+  fillSizes(item.variations);
   const syncSizeVisibility = () => { sizeSel.style.display = (styleSel.value === 'premium' && inStock.length) ? '' : 'none'; };
   syncSizeVisibility();
   adModal.style.display = 'flex'; document.body.style.overflow = 'hidden';
@@ -2088,11 +2095,13 @@ function openAdMaker(item){
     types.map(t => '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(item.name + ' ' + t.name) + '</option>').join('');
   typeSel.style.display = types.length ? '' : 'none';
   typeSel.value = types.some(t => t.id === cardTypeSel.get(item.id)) ? cardTypeSel.get(item.id) : '';
+  const syncTypeSizes = () => { fillSizes(typeVariations(item, types.find(x => x.id === typeSel.value)) ); syncSizeVisibility(); };
+  syncTypeSizes();
   let look = item;
   async function currentLook(){
     const t = types.find(x => x.id === typeSel.value);
     if (!t) return types.length && item.mainTypeName ? Object.assign({}, item, { name: item.name + ' ' + item.mainTypeName }) : item;
-    return Object.assign({}, item, { id: item.id + '~' + t.id, name: item.name + ' ' + t.name, thumb: t.thumb, dataUrl: await fetchTypePhoto(currentCatalogueId, item, t) });
+    return Object.assign({}, item, { id: item.id + '~' + t.id, name: item.name + ' ' + t.name, thumb: t.thumb, variations: typeVariations(item, t), dataUrl: await fetchTypePhoto(currentCatalogueId, item, t) });
   }
   const fileName = () => (look.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'product') + '-offer.jpg';
   async function render(){
@@ -2117,7 +2126,7 @@ function openAdMaker(item){
   pctInput.onchange = render;
   styleSel.onchange = render;
   sizeSel.onchange = render;
-  typeSel.onchange = render;
+  typeSel.onchange = () => { syncTypeSizes(); render(); };
   adModal.querySelector('.ad-download').onclick = () => {
     if (!blob) return;
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName();
@@ -3695,7 +3704,28 @@ function openTypesEditor(item){
     typesModal.style.cssText = 'position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); display:none; flex-direction:column; align-items:center; overflow:auto; padding:14px; font-family:Arial,sans-serif;';
     document.body.appendChild(typesModal);
   }
-  const draft = { main: item.mainTypeName || '', types: itemTypes(item).map(t => ({ id: t.id, name: t.name, thumb: t.thumb })), removed: [] };
+  const draft = { main: item.mainTypeName || '', types: itemTypes(item).map(t => ({ id: t.id, name: t.name, thumb: t.thumb, variations: typeHasOwnSizes(t) ? t.variations.map(v => ({ ...v })) : [] })), removed: [] };
+  const withDim = dimsEnabled();
+  const mainSizesText = (item.variations || []).map(v => [v.code, v.inch ? v.inch + '"' : '', v.price ? '₹' + v.price : ''].filter(Boolean).join(' ')).filter(Boolean).join(', ') || 'no sizes';
+  const sizeEditorHtml = (t, i) => {
+    const own = t.variations && t.variations.length;
+    const head = `<button type="button" class="tm-sizes" data-i="${i}" style="${btnCss} width:100%; margin-top:6px; background:none; border:1.5px solid ${own ? '#8ab4f8' : '#444'}; color:${own ? '#8ab4f8' : '#bdbdbd'}; text-align:left;">📏 Sizes: ${own ? 'OWN (' + t.variations.length + ')' : 'same as main'} ${t.__open ? '▴' : '▾'}</button>`;
+    if (!t.__open) return head;
+    const rows = (t.variations || []).map((v, k) => `<div style="display:flex; gap:4px; margin-top:5px;">
+        <input type="text" class="tv" data-i="${i}" data-k="${k}" data-f="code" value="${escapeHtml(v.code || '')}" placeholder="Size" style="${inCss} padding:7px; font-size:13px;">
+        <input type="text" class="tv" data-i="${i}" data-k="${k}" data-f="inch" value="${escapeHtml(v.inch || '')}" placeholder="Inch" inputmode="decimal" style="${inCss} padding:7px; font-size:13px; max-width:62px;">
+        <input type="text" class="tv" data-i="${i}" data-k="${k}" data-f="price" value="${escapeHtml(v.price || '')}" placeholder="MRP" inputmode="decimal" style="${inCss} padding:7px; font-size:13px; max-width:72px;">
+        ${withDim ? `<input type="text" class="tv" data-i="${i}" data-k="${k}" data-f="dim" value="${escapeHtml(v.dim || '')}" placeholder="📐" style="${inCss} padding:7px; font-size:13px; max-width:80px;">` : ''}
+        <button type="button" class="tv-del" data-i="${i}" data-k="${k}" style="${btnCss} padding:6px 8px; background:none; border:1.5px solid #8a3a30; color:#ff8a80;">✕</button></div>`).join('');
+    return head + `<div style="border:1.5px solid #2a3a55; border-radius:8px; padding:6px 8px 8px; margin-top:4px;">
+        ${own ? '' : `<div style="font-size:11px; color:#9a9a9a; margin:2px 0 4px;">Now uses the main sizes: ${escapeHtml(mainSizesText)}</div>`}
+        ${rows}
+        <div style="display:flex; gap:5px; margin-top:6px; flex-wrap:wrap;">
+          <button type="button" class="tv-add" data-i="${i}" style="${btnCss} flex:1; background:none; border:1.5px solid #8ab4f8; color:#8ab4f8; font-size:12px;">＋ Size</button>
+          <button type="button" class="tv-copy" data-i="${i}" style="${btnCss} flex:1; background:none; border:1.5px solid #555; color:#ddd; font-size:12px;">⧉ Copy main sizes</button>
+          ${own ? `<button type="button" class="tv-clear" data-i="${i}" style="${btnCss} flex:1; background:none; border:1.5px solid #555; color:#ddd; font-size:12px;">↺ Use main sizes</button>` : ''}
+        </div></div>`;
+  };
   const btnCss = 'border-radius:6px; padding:8px 10px; font-weight:800; font-size:13px; cursor:pointer;';
   const inCss = 'width:100%; padding:9px; border-radius:6px; border:1.5px solid #f0c43f; background:#111; color:#fff; font-weight:800; font-size:14px;';
   let pickFor = null;
@@ -3703,7 +3733,7 @@ function openTypesEditor(item){
     typesModal.innerHTML = `
       <div style="width:100%; max-width:480px; color:#f2f2f2;">
         <div style="font-weight:900; font-size:17px; color:#f0c43f; margin-bottom:4px;">🎨 Types of ${escapeHtml(item.name)}</div>
-        <div style="font-size:12px; color:#bdbdbd; line-height:1.5; margin-bottom:12px;">Same sizes & prices — a different photo and name for each type. Each type shows as its own page in the PDF and its own choice in Billing.</div>
+        <div style="font-size:12px; color:#bdbdbd; line-height:1.5; margin-bottom:12px;">A different photo and name for each type. Sizes & prices are the same as the main product — or tap 📏 Sizes to give a type its own (e.g. a different base). Each type shows separately in the PDF and in Billing.</div>
         <div style="display:flex; gap:10px; align-items:center; background:#151515; border:1.5px solid #333; border-radius:10px; padding:8px; margin-bottom:8px;">
           <img src="${itemPhoto(item)}" style="width:70px; height:70px; object-fit:contain; background:#fff; border-radius:6px; flex-shrink:0;">
           <div style="flex:1; min-width:0;"><div style="font-size:11px; color:#bdbdbd; font-weight:700; margin-bottom:4px;">MAIN PHOTO — name of this type (optional)</div>
@@ -3719,6 +3749,7 @@ function openTypesEditor(item){
               <button type="button" class="tm-up" data-i="${i}" ${i === 0 ? 'disabled' : ''} style="${btnCss} background:none; border:1.5px solid #555; color:#ddd;">↑</button>
               <button type="button" class="tm-del" data-i="${i}" style="${btnCss} background:none; border:1.5px solid #8a3a30; color:#ff8a80;">✕</button>
             </div>
+            ${sizeEditorHtml(t, i)}
           </div>
         </div>`).join('')}
         <div style="font-size:12px; color:#bdbdbd; font-weight:700; margin:10px 0 6px;">Add a type — tap a name (or ✏️ Other):</div>
@@ -3736,6 +3767,12 @@ function openTypesEditor(item){
     const q = (c) => typesModal.querySelector(c), qa = (c) => typesModal.querySelectorAll(c);
     q('.tm-main').addEventListener('input', (e) => { draft.main = e.target.value; });
     qa('.tm-name').forEach(el => el.addEventListener('input', () => { draft.types[el.dataset.i].name = el.value; }));
+    qa('.tm-sizes').forEach(el => el.addEventListener('click', () => { const t = draft.types[el.dataset.i]; t.__open = !t.__open; render(); }));
+    qa('.tv').forEach(el => el.addEventListener('input', () => { const v = draft.types[el.dataset.i].variations[el.dataset.k]; if (v) v[el.dataset.f] = el.value; }));
+    qa('.tv-del').forEach(el => el.addEventListener('click', () => { draft.types[el.dataset.i].variations.splice(Number(el.dataset.k), 1); render(); }));
+    qa('.tv-add').forEach(el => el.addEventListener('click', () => { const t = draft.types[el.dataset.i]; t.variations = t.variations || []; t.variations.push({ code: '', inch: '', price: '' }); render(); }));
+    qa('.tv-copy').forEach(el => el.addEventListener('click', () => { const t = draft.types[el.dataset.i]; t.variations = (t.variations || []).concat((item.variations || []).map(v => { const c = { code: v.code || '', inch: v.inch || '', price: v.price || '' }; if (v.dim) c.dim = v.dim; return c; })); render(); }));
+    qa('.tv-clear').forEach(el => el.addEventListener('click', () => { if (!confirm('Use the main sizes for this type? (Its own sizes will be removed.)')) return; draft.types[el.dataset.i].variations = []; render(); }));
     qa('.tm-photo').forEach(el => el.addEventListener('click', () => { pickFor = Number(el.dataset.i); q('.tm-file').click(); }));
     qa('.tm-up').forEach(el => el.addEventListener('click', () => { const i = Number(el.dataset.i); [draft.types[i - 1], draft.types[i]] = [draft.types[i], draft.types[i - 1]]; render(); }));
     qa('.tm-del').forEach(el => el.addEventListener('click', () => {
@@ -3776,7 +3813,18 @@ function openTypesEditor(item){
           fullPhotoCache.set(typePhotoKey(catId, item.id, t.id), t.newFull);
         }
         const live = items.find(i => i.id === item.id) || item;
-        live.types = list.map(t => ({ id: t.id, name: t.name, thumb: t.thumb }));
+        live.types = list.map(t => {
+          const o = { id: t.id, name: t.name, thumb: t.thumb };
+          const old = itemTypes(live).find(x => x.id === t.id);
+          const vars = (t.variations || []).map(v => {
+            const c = { code: String(v.code || '').trim().toUpperCase(), inch: String(v.inch || '').trim(), price: String(v.price || '').trim() };
+            if (String(v.dim || '').trim()) c.dim = String(v.dim).trim().toUpperCase();
+            const was = old && (old.variations || []).find(w => w.code === c.code && w.inch === c.inch); if (was && was.outOfStock) c.outOfStock = true;
+            return c;
+          }).filter(v => v.code || v.inch || v.price);
+          if (vars.length) o.variations = vars;
+          return o;
+        });
         if (!live.types.length) delete live.types;
         live.mainTypeName = draft.main.trim().toUpperCase();
         if (!live.mainTypeName) delete live.mainTypeName;
@@ -3817,7 +3865,7 @@ function renderGrid(){
     ? items.filter(item => {
         const nameMatch = item.name.toLowerCase().includes(query);
         const sizeMatch = item.variations.some(v => (v.code || '').toLowerCase().includes(query));
-        const typeMatch = itemTypes(item).some(t => (item.name + ' ' + t.name).toLowerCase().includes(query)) || (item.name + ' ' + (item.mainTypeName || '')).toLowerCase().includes(query);
+        const typeMatch = itemTypes(item).some(t => (item.name + ' ' + t.name).toLowerCase().includes(query) || (t.variations || []).some(v => (v.code || '').toLowerCase().includes(query))) || (item.name + ' ' + (item.mainTypeName || '')).toLowerCase().includes(query);
         return nameMatch || sizeMatch || typeMatch;
       })
     : items;
@@ -3833,18 +3881,19 @@ function renderGrid(){
   displayItems.forEach((item) => {
     const index = items.findIndex(i => i.id === item.id);
     if (item.id === inlineEditId && inlineDraft){ grid.appendChild(buildInlineEditor(item)); return; }
-    const sizeRowsHtml = (item.variations || []).map((v, vIdx) => {
+    const types = itemTypes(item);
+    const selT = types.find(t => t.id === cardTypeSel.get(item.id));
+    const ownT = typeHasOwnSizes(selT) ? selT : null; // this type has its own sizes & prices
+    const sizeRowsHtml = (ownT ? `<div style="font-size:11px; font-weight:800; color:#8ab4f8; padding:4px 0;">📏 Sizes for ${escapeHtml(ownT.name)}</div>` : '') + (ownT ? ownT.variations : (item.variations || [])).map((v, vIdx) => {
       const label = [v.code, v.inch ? v.inch + '"' : '', v.price ? 'Rs.' + v.price : ''].filter(Boolean).join('-') + (dimText(v) ? '  📐 ' + dimText(v) : '');
       if (!label) return '';
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
           <span style="flex:1; min-width:0; font-size:13px; font-weight:700; line-height:1.35; color:${v.outOfStock ? '#8a8a8a' : 'var(--brass-light)'}; ${v.outOfStock ? 'text-decoration:line-through;' : ''}">${escapeHtml(label)}</span>
-          <button type="button" class="size-stock-toggle" data-id="${item.id}" data-var-idx="${vIdx}" style="flex-shrink:0; background:none; border:1.5px solid ${v.outOfStock ? '#7cd992' : '#e0705a'}; color:${v.outOfStock ? '#7cd992' : '#e0705a'}; border-radius:5px; padding:4px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:11px; cursor:pointer; white-space:nowrap;">${v.outOfStock ? '✅ Restock' : '🚫 Out'}</button>
+          <button type="button" class="size-stock-toggle" data-id="${item.id}" data-var-idx="${vIdx}" data-t="${ownT ? ownT.id : ''}" style="flex-shrink:0; background:none; border:1.5px solid ${v.outOfStock ? '#7cd992' : '#e0705a'}; color:${v.outOfStock ? '#7cd992' : '#e0705a'}; border-radius:5px; padding:4px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:11px; cursor:pointer; white-space:nowrap;">${v.outOfStock ? '✅ Restock' : '🚫 Out'}</button>
         </div>`;
     }).join('');
 
-    const types = itemTypes(item);
-    const selT = types.find(t => t.id === cardTypeSel.get(item.id));
     const typeChipsHtml = types.length ? `<div style="display:flex; flex-wrap:wrap; gap:5px; padding:8px 10px 0;">${[{ id: '', name: item.mainTypeName || 'MAIN PHOTO' }].concat(types).map(t => {
         const on = (selT ? selT.id : '') === t.id;
         return `<button type="button" class="type-chip" data-id="${item.id}" data-t="${t.id}" style="background:${on ? 'var(--brass-light)' : 'none'}; color:${on ? '#000' : 'var(--brass-light)'}; border:1.5px solid var(--brass-light); border-radius:12px; padding:4px 9px; font-family:Arial,sans-serif; font-weight:800; font-size:11px; cursor:pointer;">${escapeHtml(t.name)}</button>`;
@@ -3931,7 +3980,7 @@ function renderGrid(){
       cardTypeSel.set(id, btn.getAttribute('data-t') || '');
       const card = btn.closest('.item-card');
       const item = items.find(i => i.id === id);
-      if (!card || !item){ renderGrid(); return; }
+      if (!card || !item || itemTypes(item).some(typeHasOwnSizes)){ renderGrid(); return; }
       const t = itemTypes(item).find(x => x.id === cardTypeSel.get(id));
       const img = card.querySelector('img'); if (img) img.src = t ? t.thumb : itemPhoto(item);
       card.querySelectorAll('.type-chip').forEach(c => { const on = c === btn; c.style.background = on ? 'var(--brass-light)' : 'none'; c.style.color = on ? '#000' : 'var(--brass-light)'; });
@@ -3972,8 +4021,10 @@ function renderGrid(){
       const id = Number(btn.getAttribute('data-id'));
       const varIdx = Number(btn.getAttribute('data-var-idx'));
       const item = items.find(i => i.id === id);
-      if (!item || !item.variations || !item.variations[varIdx]) return;
-      item.variations[varIdx].outOfStock = !item.variations[varIdx].outOfStock;
+      const tId = btn.getAttribute('data-t');
+      const vars = tId ? typeVariations(item, itemTypes(item).find(t => t.id === tId)) : (item && item.variations);
+      if (!item || !vars || !vars[varIdx]) return;
+      vars[varIdx].outOfStock = !vars[varIdx].outOfStock;
       renderGrid();
       saveItemToStorage(item);
     });
