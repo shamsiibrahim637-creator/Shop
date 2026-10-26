@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050505">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Purchase">
+<title>Purchase Rates</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="caps.js"></script>
+<link rel="manifest" href="purchase.webmanifest">
+<link rel="icon" href="purchase-icon-192.png">
+<link rel="apple-touch-icon" href="purchase-icon-192.png">
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<script>
+// ---- Firebase init (shared across all three apps for live cross-device sync) ----
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+window.__firebaseReady = false;
+try {
+  firebase.initializeApp(firebaseConfig);
+  window.__db = firebase.firestore();
+  // Keep a copy on the phone (only possible on a real web address) — faster
+  // repeat opens and it keeps working on a weak signal.
+  if (location.protocol === 'https:'){
+    window.__db.enablePersistence({ synchronizeTabs: true }).catch(err => console.warn('Offline copy not enabled:', err && err.code));
+  }
+  window.__firebaseReady = true;
+} catch (err) {
+  console.error('Firebase init failed:', err);
+}
+
+// ---- Shared cloud storage layer (Firestore), used by all three apps ------
+// Every app already talks to `storage.get/set/delete(key[, value])` exactly
+// like it did with IndexedDB — only the plumbing underneath changes.
+//
+// A single bill/purchase/catalogue-item list is saved as ONE JSON string
+// under one key (e.g. "all-bills"). Firestore caps a single document at
+// ~1MB, and that blob only grows over time as the shop's history builds up
+// — so instead of trying to keep photos small enough to always fit in one
+// document (which is what silently broke last time once the data grew),
+// large values are transparently split across several small "chunk"
+// documents and reassembled on read. This means saving can't silently fail
+// just because the data got big.
+const FIRESTORE_CHUNK_SIZE = 900000; // chars per chunk, safely under the ~1MB doc cap
+
+function makeFirestoreStorage(collectionName){
+  function coll(){ return window.__db.collection(collectionName); }
+  function safeId(key){ return String(key).replace(/\//g, '_SLASH_'); }
+  function chunkId(key, i){ return safeId(key) + '__chunk' + i; }
+
+  return {
+    async get(key){
+      const snap = await coll().doc(safeId(key)).get();
+      if (!snap.exists) return null;
+      const data = snap.data();
+      if (!data.chunked) return { key, value: data.value };
+      const n = data.chunkCount || 0;
+      const parts = await Promise.all(
+        Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get())
+      );
+      return { key, value: parts.map(p => (p.exists ? p.data().part : '')).join('') };
+    },
+    async set(key, value){
+      let prevChunkCount = 0;
+      try {
+        const prevSnap = await coll().doc(safeId(key)).get();
+        if (prevSnap.exists && prevSnap.data().chunked) prevChunkCount = prevSnap.data().chunkCount || 0;
+      } catch (e) { /* no previous doc — nothing to clean up */ }
+
+      const str = String(value);
+      if (str.length <= FIRESTORE_CHUNK_SIZE){
+        await coll().doc(safeId(key)).set({ chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        if (prevChunkCount > 0){
+          await Promise.all(Array.from({ length: prevChunkCount }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+        return { key, value: str };
+      }
+
+      const chunks = [];
+      for (let i = 0; i < str.length; i += FIRESTORE_CHUNK_SIZE) chunks.push(str.slice(i, i + FIRESTORE_CHUNK_SIZE));
+      await Promise.all(chunks.map((part, i) => coll().doc(chunkId(key, i)).set({ part })));
+      await coll().doc(safeId(key)).set({ chunked: true, chunkCount: chunks.length, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+      if (prevChunkCount > chunks.length){
+        await Promise.all(Array.from({ length: prevChunkCount - chunks.length }, (_, i) =>
+          coll().doc(chunkId(key, chunks.length + i)).delete().catch(() => {})
+        ));
+      }
+      return { key, value: str };
+    },
+    async delete(key){
+      try {
+        const snap = await coll().doc(safeId(key)).get();
+        if (snap.exists && snap.data().chunked){
+          const n = snap.data().chunkCount || 0;
+          await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).delete().catch(() => {})));
+        }
+      } catch (e) { /* ignore — still try deleting the manifest below */ }
+      await coll().doc(safeId(key)).delete();
+      return { key, deleted: true };
+    },
+    async list(prefix){
+      return { keys: [] }; // not used by any app — kept only for interface compatibility
+    },
+    // Recovery helper: every saved value whose key starts with `prefix`
+    // (e.g. all products saved under one catalogue, even ones that have
+    // dropped out of its product list). Reassembles chunked values.
+    async listByPrefix(prefix){
+      const FP = firebase.firestore.FieldPath.documentId();
+      const start = safeId(prefix);
+      const snap = await coll().where(FP, '>=', start).where(FP, '<', start + '\uf8ff').get();
+      const out = [];
+      for (const d of snap.docs){
+        if (d.id.indexOf('__chunk') !== -1) continue;
+        const key = d.id.replace(/_SLASH_/g, '/');
+        const data = d.data() || {};
+        let value = null;
+        if (!data.chunked) value = data.value;
+        else { const r = await this.get(key); value = r ? r.value : null; }
+        if (value != null) out.push({ key, value });
+      }
+      return out;
+    },
+    // Bulk write for imports: writing hundreds of items one at a time (each
+    // a separate get-then-set round trip) is what actually broke large
+    // imports before — on a slow connection it can take so long the person
+    // assumes it's done and leaves the page, so only the first few items
+    // ever get saved. This uses Firestore's batch write instead, splitting
+    // batches by BOTH item count (max 400, Firestore's own per-batch limit)
+    // AND total data size (max ~8MB, safely under Firestore's ~10MB
+    // per-request cap) — photos mean a batch can hit the size limit long
+    // before it hits the count limit. Any single value still too big for
+    // one chunk falls back to the normal chunked set() afterwards.
+    async setMany(pairs){
+      const MAX_BATCH_OPS = 400;
+      const MAX_BATCH_BYTES = 8000000;
+      const overflow = [];
+      let batch = window.__db.batch();
+      let opsInBatch = 0;
+      let bytesInBatch = 0;
+
+      for (const [key, value] of pairs){
+        const str = String(value);
+        if (str.length > FIRESTORE_CHUNK_SIZE){ overflow.push([key, value]); continue; }
+
+        if (opsInBatch > 0 && (opsInBatch >= MAX_BATCH_OPS || bytesInBatch + str.length > MAX_BATCH_BYTES)){
+          await batch.commit();
+          batch = window.__db.batch();
+          opsInBatch = 0;
+          bytesInBatch = 0;
+        }
+
+        batch.set(coll().doc(safeId(key)), { chunked: false, value: str, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        opsInBatch++;
+        bytesInBatch += str.length;
+      }
+      if (opsInBatch > 0) await batch.commit();
+
+      for (const [key, value] of overflow){
+        await this.set(key, value);
+      }
+    },
+    async getAllEntries(){ return this.listByPrefix(''); },
+    // Deletes everything in this collection except keepKeys.
+    async clearAll(keepKeys){
+      const keep = new Set(keepKeys || []);
+      const all = await this.listByPrefix('');
+      await Promise.all(all.filter(r => !keep.has(r.key)).map(r => this.delete(r.key).catch(() => null)));
+    },
+    // Real-time: cb(value) fires immediately with the current value, then
+    // again every time this key changes on any device. Returns an unsubscribe
+    // function.
+    onChange(key, cb){
+      return coll().doc(safeId(key)).onSnapshot(async (snap) => {
+        if (!snap.exists){ cb(null); return; }
+        const data = snap.data();
+        if (!data.chunked){ cb(data.value); return; }
+        const n = data.chunkCount || 0;
+        try {
+          const parts = await Promise.all(Array.from({ length: n }, (_, i) => coll().doc(chunkId(key, i)).get()));
+          cb(parts.map(p => (p.exists ? p.data().part : '')).join(''));
+        } catch (e) { console.error('Live update failed for', key, e); }
+      }, (err) => console.error('Live sync error for', key, err));
+    }
+  };
+}
+</script>
+</head>
+<body>
+<!-- ===== PIN lock: keeps casual visitors out of the app ===== -->
+<div id="pin-lock" style="position:fixed; inset:0; z-index:99999; background:#050505; display:flex; align-items:center; justify-content:center; padding:24px;">
+  <div style="width:100%; max-width:340px; text-align:center; font-family:Arial,sans-serif;">
+    <div style="font-size:44px; margin-bottom:6px;">🔒</div>
+    <h2 id="pin-title" style="font-family:Georgia,serif; color:#f0c341; letter-spacing:1px; margin:0 0 6px; font-size:24px;">Shop App</h2>
+    <p id="pin-msg" style="color:#c9c9c9; font-size:14px; margin:0 0 18px; line-height:1.4;">Checking...</p>
+    <input id="pin-input-1" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <input id="pin-input-2" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="Repeat PIN" style="display:none; width:100%; box-sizing:border-box; padding:15px; margin-bottom:10px; text-align:center; letter-spacing:10px; font-size:26px; font-weight:800; border-radius:8px; border:1.5px solid #b8912f; background:#161616; color:#fff;">
+    <button id="pin-go-btn" type="button" style="display:none; width:100%; padding:15px; border:none; border-radius:8px; background:#f0c341; color:#000; font-weight:800; font-size:17px; cursor:pointer;">Unlock</button>
+    <button id="pin-cancel-btn" type="button" style="display:none; width:100%; margin-top:10px; padding:13px; border:1.5px solid #333; border-radius:8px; background:none; color:#c9c9c9; font-weight:800; font-size:15px; cursor:pointer;">Cancel</button>
+    <p id="pin-error" style="color:#e0705a; font-size:14px; font-weight:700; min-height:20px; margin:12px 0 0;"></p>
+    <p id="pin-help" style="display:none; color:#8a8a8a; font-size:12px; margin:14px 0 0; line-height:1.4;">Forgot the PIN? Open the app on a phone that's already unlocked and use 🔒 → Change PIN.</p>
+  </div>
+</div>
+
+<div id="app-topbar" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:#0a2a1a; border-bottom:1.5px solid #25d366; position:relative; font-family:Arial,sans-serif;">
+  <span style="font-size:12px; font-weight:700; color:#7cd992; white-space:nowrap;">☁️ Cloud</span>
+  <span style="display:flex; gap:6px;">
+    <button id="install-btn" type="button" style="background:#f0c341; color:#000; border:none; border-radius:6px; padding:7px 12px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap;">📲 Add to Home Screen</button>
+    <button id="pin-menu-btn" type="button" title="Lock / Change PIN" style="background:none; border:1px solid #25d366; color:#7cd992; border-radius:6px; padding:4px 9px; font-size:13px; cursor:pointer;">🔒</button>
+  </span>
+  <div id="pin-menu" style="display:none; position:absolute; right:8px; top:100%; margin-top:4px; z-index:9000; background:#161616; border:1.5px solid #b8912f; border-radius:8px; overflow:hidden; text-align:left;">
+    <button type="button" id="pin-lock-now" style="display:block; width:100%; padding:12px 18px; background:none; border:none; border-bottom:1px solid #333; color:#f0c341; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔒 Lock now</button>
+    <button type="button" id="pin-change" style="display:block; width:100%; padding:12px 18px; background:none; border:none; color:#c9c9c9; font-family:Arial,sans-serif; font-weight:800; font-size:14px; cursor:pointer; text-align:left;">🔑 Change PIN</button>
+  </div>
+</div>
+<script>
+// ---- PIN lock ----
+// One PIN for the whole shop, stored (as a scrambled fingerprint, never the
+// PIN itself) in the cloud so it's the same on every phone. Once a phone is
+// unlocked it stays unlocked until you tap 🔒 → Lock now, or the PIN changes.
+// Note: this keeps casual visitors out of the app screen; it is not the same
+// as a full account login.
+(function(){
+  const lockEl = document.getElementById('pin-lock');
+  const titleEl = document.getElementById('pin-title');
+  const msgEl = document.getElementById('pin-msg');
+  const in1 = document.getElementById('pin-input-1');
+  const in2 = document.getElementById('pin-input-2');
+  const goBtn = document.getElementById('pin-go-btn');
+  const errEl = document.getElementById('pin-error');
+  const helpEl = document.getElementById('pin-help');
+  const PIN_KEY = 'app-pin';
+  const LOCAL_KEY = 'shopapp-unlocked-with';
+  const pinStore = makeFirestoreStorage('billing_kv');
+  let mode = 'checking'; // 'set' | 'unlock' | 'change'
+  let cloudPin = null;   // { hash, salt }
+
+  function fingerprint(pin, salt){
+    const s = salt + ':' + pin + ':shop-app';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let r = 0; r < 500; r++){ // repeated so guessing is slow
+      for (let i = 0; i < s.length; i++){
+        const ch = s.charCodeAt(i) + r;
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    }
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+  function localGet(){ try { return localStorage.getItem(LOCAL_KEY); } catch (e) { return null; } }
+  function localSet(v){ try { if (v) localStorage.setItem(LOCAL_KEY, v); else localStorage.removeItem(LOCAL_KEY); } catch (e) {} }
+
+  function showLock(newMode, message){
+    mode = newMode;
+    lockEl.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    titleEl.textContent = newMode === 'set' ? 'Set a PIN' : newMode === 'change' ? 'Change PIN' : 'Shop App';
+    msgEl.textContent = message;
+    errEl.textContent = '';
+    const typing = newMode !== 'checking';
+    in1.style.display = typing ? 'block' : 'none';
+    in2.style.display = (newMode === 'set' || newMode === 'change') ? 'block' : 'none';
+    goBtn.style.display = typing ? 'block' : 'none';
+    goBtn.textContent = newMode === 'unlock' ? 'Unlock' : 'Save PIN';
+    helpEl.style.display = newMode === 'unlock' ? 'block' : 'none';
+    document.getElementById('pin-cancel-btn').style.display = newMode === 'change' ? 'block' : 'none';
+    in1.value = ''; in2.value = '';
+    in1.placeholder = newMode === 'unlock' ? 'PIN' : 'New PIN';
+    if (typing) setTimeout(() => in1.focus(), 50);
+  }
+  function hideLock(){
+    lockEl.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function savePin(pin){
+    const salt = Math.random().toString(36).slice(2, 10);
+    const rec = { hash: fingerprint(pin, salt), salt };
+    await pinStore.set(PIN_KEY, JSON.stringify(rec));
+    cloudPin = rec;
+    localSet(rec.hash);
+  }
+
+  async function submit(){
+    errEl.textContent = '';
+    const p1 = in1.value.trim(), p2 = in2.value.trim();
+    if (!/^\d{4,8}$/.test(p1)){ errEl.textContent = 'PIN must be 4 to 8 digits.'; return; }
+    if (mode === 'unlock'){
+      if (cloudPin && fingerprint(p1, cloudPin.salt) === cloudPin.hash){
+        localSet(cloudPin.hash);
+        hideLock();
+      } else {
+        errEl.textContent = 'Wrong PIN — try again.';
+        in1.value = '';
+      }
+      return;
+    }
+    if (p1 !== p2){ errEl.textContent = 'The two PINs don\'t match.'; return; }
+    goBtn.disabled = true; goBtn.textContent = 'Saving...';
+    try {
+      await savePin(p1);
+      hideLock();
+      if (mode === 'change') alert('PIN changed ✓ — other phones will ask for the new PIN next time.');
+    } catch (e) {
+      errEl.textContent = 'Could not save the PIN — check your internet and try again.';
+    } finally {
+      goBtn.disabled = false; goBtn.textContent = 'Save PIN';
+    }
+  }
+  goBtn.addEventListener('click', submit);
+  document.getElementById('pin-cancel-btn').addEventListener('click', hideLock);
+  [in1, in2].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  async function start(){
+    showLock('checking', 'Checking...');
+    let r;
+    try {
+      r = await pinStore.get(PIN_KEY);
+    } catch (e) {
+      // Offline: a phone that was already unlocked keeps working.
+      if (localGet()) { hideLock(); return; }
+      showLock('checking', 'Can\'t reach the internet to check the PIN. Connect and reopen the app.');
+      return;
+    }
+    if (!r || !r.value){
+      showLock('set', 'Choose a 4–8 digit PIN for your shop app. Everyone using the app will need it once on each phone.');
+      return;
+    }
+    try { cloudPin = JSON.parse(r.value); } catch (e) { cloudPin = null; }
+    if (cloudPin && localGet() === cloudPin.hash){ hideLock(); return; }
+    showLock('unlock', 'Enter your shop PIN.');
+  }
+
+  // 🔒 menu
+  const menuBtn = document.getElementById('pin-menu-btn');
+  const menu = document.getElementById('pin-menu');
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; });
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.getElementById('pin-lock-now').addEventListener('click', () => {
+    localSet(null);
+    showLock('unlock', 'Locked. Enter your shop PIN.');
+  });
+  document.getElementById('pin-change').addEventListener('click', () => {
+    // This phone is already unlocked, so it's trusted to set a new PIN.
+    showLock('change', 'Type a new 4–8 digit PIN twice. All phones will need the new PIN once.');
+  });
+
+  start();
+})();
+</script>
+<script>
+// ---- "Add to Home Screen" ----
+(function(){
+  const btn = document.getElementById('install-btn');
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  if (standalone) btn.style.display = 'none'; // already opened from the home-screen icon
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.style.display = ''; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.style.display = 'none'; });
+  btn.addEventListener('click', async () => {
+    if (deferred){
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) {}
+      deferred = null;
+      return;
+    }
+    if (location.protocol !== 'https:'){
+      alert('To add this app to your home screen, open it from its web address (your GitHub link) — not from a downloaded or WhatsApp file.');
+      return;
+    }
+    alert('Your phone didn\'t offer the quick install, so add it from the browser menu:\n\n• Chrome: tap ⋮ (top-right) → "Add to Home screen" (or "Install app")\n• Samsung Internet: tap ☰ → "Add page to" → "Home screen"');
+  });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker not registered:', err));
+  }
+})();
+</script>
+<style>
+  :root{ --brass:#b8912f; --brass-light:#f0c341; --navy:#050505; --navy-2:#161616; --cream:#ffffff; --line:#3a3a3a; --blue:#4a90d9; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--navy); color:var(--cream); font-family:Arial, sans-serif; -webkit-tap-highlight-color:transparent; }
+  .hd{ display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1.5px solid var(--line); }
+  .hd h1{ flex:1; margin:0; font-family:Georgia, serif; color:var(--brass-light); font-size:21px; letter-spacing:1px; }
+  .hbtn{ background:none; border:1.5px solid var(--line); color:#c9c9c9; border-radius:8px; padding:7px 10px; font-weight:800; font-size:13px; text-decoration:none; white-space:nowrap; }
+  .wrap{ max-width:760px; margin:0 auto; padding:12px 12px 60px; }
+  .card{ background:var(--navy-2); border:1.5px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+  input, select, textarea{ width:100%; padding:10px; border-radius:7px; border:1.5px solid #333; background:#0b0b0b; color:#fff; font-size:15px; font-weight:700; font-family:Arial,sans-serif; }
+  label.lb{ display:block; font-size:12px; color:#9a9a9a; font-weight:700; margin:10px 0 5px; }
+  .btn{ border:none; border-radius:9px; padding:12px; font-weight:800; font-size:15px; cursor:pointer; font-family:Arial,sans-serif; }
+  .btn.gold{ background:var(--brass-light); color:#000; } .btn.blue{ background:var(--blue); color:#000; }
+  .btn.ghost{ background:none; border:1.5px solid #3a3a3a; color:#ddd; } .btn.red{ background:none; border:1.5px solid #8a3a30; color:#ff8a80; }
+  .btns{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; } .btns .btn{ flex:1; min-width:120px; }
+  .chips{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .chip{ padding:7px 11px; border-radius:16px; border:1.5px solid #3a3a3a; background:#111; color:#ddd; font-weight:800; font-size:12px; cursor:pointer; }
+  .chip.on{ background:var(--blue); color:#000; border-color:var(--blue); }
+  .note{ font-size:12px; color:#9a9a9a; line-height:1.5; }
+  .grid{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+  @media (min-width:640px){ .grid{ grid-template-columns:repeat(3, 1fr); } }
+  .pc{ background:var(--navy-2); border:1.5px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+  .pc img{ width:100%; height:150px; object-fit:contain; background:#fff; display:block; }
+  .pc .bd{ padding:9px 10px; flex:1; }
+  .pc .nm{ font-weight:900; font-size:15px; margin:0 0 5px; line-height:1.25; }
+  .vend{ display:inline-block; background:#16324f; color:#9cc8f5; border:1px solid var(--blue); font-size:11px; font-weight:900; padding:2px 7px; border-radius:5px; margin-bottom:6px; }
+  .sz{ display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.06); font-size:13px; font-weight:700; }
+  .sz .pp{ color:#7cd992; font-weight:900; white-space:nowrap; }
+  .sz .mrp{ color:#8a8a8a; font-size:11px; font-weight:700; }
+  .pc .act{ display:flex; border-top:1.5px solid var(--line); }
+  .pc .act button{ flex:1; background:none; border:none; border-right:1.5px solid var(--line); color:var(--brass-light); font-weight:800; font-size:13px; padding:10px 4px; cursor:pointer; }
+  .pc .act button:last-child{ border-right:none; }
+  .modal{ position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.97); display:none; flex-direction:column; align-items:center; overflow:auto; padding:14px; }
+  .sheet{ width:100%; max-width:520px; }
+  .sheet h3{ margin:0 0 8px; color:var(--brass-light); font-size:18px; }
+  .srow{ display:flex; gap:5px; margin-top:6px; align-items:center; }
+  .srow input{ padding:8px; font-size:14px; }
+  .x{ background:none; border:1.5px solid #8a3a30; color:#ff8a80; border-radius:7px; padding:7px 9px; font-weight:900; cursor:pointer; }
+  .pick{ display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:10px; }
+  .pick .pi{ background:#111; border:1.5px solid #333; border-radius:10px; padding:5px; text-align:center; cursor:pointer; }
+  .pick .pi img{ width:100%; height:86px; object-fit:contain; background:#fff; border-radius:6px; display:block; }
+  .pick .pi .t{ font-size:11px; font-weight:800; margin-top:4px; line-height:1.25; }
+  .pick .pi .done{ font-size:10px; color:#7cd992; font-weight:800; }
+  .empty{ text-align:center; color:#8a8a8a; padding:26px 10px; border:1.5px dashed var(--line); border-radius:12px; line-height:1.5; }
+  #toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff; padding:11px 16px; border-radius:10px; font-weight:700; font-size:14px; z-index:99000; display:none; border:1px solid #444; max-width:90%; text-align:center; }
+</style>
+
+<div class="hd">
+  <h1>🛒 Purchase Rates</h1>
+  <a class="hbtn" href="catalogue.html">📒 Catalogue</a>
+  <a class="hbtn" href="index.html">🏠</a>
+</div>
+<div class="wrap">
+  <div class="card">
+    <input type="text" id="search" placeholder="🔍 Search model no., size or vendor...">
+    <div class="chips" id="vendors"></div>
+    <div class="btns">
+      <button type="button" class="btn blue" id="from-cat">📒 Add from Catalogue</button>
+      <button type="button" class="btn ghost" id="new-item">＋ New item</button>
+    </div>
+    <div class="note" id="count" style="margin-top:8px;"></div>
+  </div>
+  <div id="grid" class="grid"></div>
+  <div class="card" style="margin-top:12px;">
+    <div class="btns" style="margin-top:0;">
+      <button type="button" class="btn gold" id="pdf-btn">📄 PDF of rates</button>
+      <button type="button" class="btn ghost" id="backup-btn">⬇ Backup</button>
+      <button type="button" class="btn ghost" id="restore-btn">⬆ Restore</button>
+    </div>
+    <input type="file" id="restore-file" accept="application/json,.json" style="display:none;">
+    <div class="note" style="margin-top:8px;">Purchase prices are kept in the cloud (separate from the Catalogue and Billing) and are the same on every phone with the shop PIN.</div>
+  </div>
+</div>
+
+<!-- add / edit -->
+<div class="modal" id="form-modal"><div class="sheet">
+  <h3 id="f-title">Purchase price</h3>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <img id="f-photo" style="width:96px; height:96px; object-fit:contain; background:#fff; border-radius:8px; flex-shrink:0; display:none;">
+    <div style="flex:1;">
+      <button type="button" class="btn ghost" id="f-photo-btn" style="width:100%; padding:10px; font-size:13px;">📷 Choose photo</button>
+      <div class="note" id="f-link" style="margin-top:6px;"></div>
+    </div>
+  </div>
+  <input type="file" id="f-file" accept="image/*" style="display:none;">
+  <label class="lb">Model no. / name</label><input type="text" id="f-name" placeholder="e.g. AC-42">
+  <label class="lb">Vendor name</label><input type="text" id="f-vendor" list="vendor-list" placeholder="Who you buy it from"><datalist id="vendor-list"></datalist>
+  <label class="lb">Sizes & purchase price</label>
+  <div id="f-sizes"></div>
+  <button type="button" class="btn ghost" id="f-add-size" style="width:100%; margin-top:8px; padding:10px; font-size:13px;">＋ Add size</button>
+  <label class="lb">Note (optional)</label><input type="text" id="f-note" placeholder="e.g. min. order 10 pcs, GST extra">
+  <div class="btns">
+    <button type="button" class="btn gold" id="f-save">💾 Save</button>
+    <button type="button" class="btn ghost" id="f-cancel">Cancel</button>
+  </div>
+  <button type="button" class="btn red" id="f-delete" style="width:100%; margin-top:8px; display:none;">🗑 Delete this entry</button>
+</div></div>
+
+<!-- pick from catalogue -->
+<div class="modal" id="pick-modal"><div class="sheet">
+  <h3>📒 Pick from Catalogue</h3>
+  <select id="p-cat"></select>
+  <input type="text" id="p-search" placeholder="🔍 Search model no. or size..." style="margin-top:8px;">
+  <div class="note" id="p-status" style="margin-top:6px;"></div>
+  <div class="pick" id="p-grid"></div>
+  <button type="button" class="btn ghost" id="p-close" style="width:100%; margin-top:12px;">Close</button>
+</div></div>
+<div id="toast"></div>
+
+<script>
+// ===================== 🛒 PURCHASE RATES =====================
+// Your buying price for each product and vendor. Products can be picked
+// straight from the Catalogue (photo, name and sizes come with them).
+const store = makeFirestoreStorage('purchase_kv');   // purchase prices (own keys: pr-*)
+const catStore = makeFirestoreStorage('catalogue_kv'); // read-only: your catalogue
+const INDEX_KEY = 'pr-index';
+const itemKey = (id) => 'pr-item:' + id;
+let items = [], index = { ids: [], stamps: {} }, vendorFilter = '', loadFailed = false;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n) => { const v = parseFloat(String(n == null ? '' : n).replace(/[^0-9.]/g, '')); return isNaN(v) ? '' : '₹' + v.toLocaleString('en-IN'); };
+function toast(t){ const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2600); }
+const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString('en-IN') : '';
+
+// ---------- load / save ----------
+async function loadAll(){
+  try {
+    const r = await store.get(INDEX_KEY);
+    index = r && r.value ? JSON.parse(r.value) : { ids: [], stamps: {} };
+    if (!index.stamps) index.stamps = {};
+    const loaded = await Promise.all(index.ids.map(id => store.get(itemKey(id)).then(x => x && x.value ? JSON.parse(x.value) : null).catch(() => undefined)));
+    if (loaded.some(x => x === undefined)) throw new Error('Some entries could not be read');
+    items = loaded.filter(Boolean);
+    loadFailed = false;
+  } catch (e) {
+    console.error(e); loadFailed = true;
+    $('count').textContent = '⚠️ Could not load — check internet and reopen. Nothing has been deleted.';
+  }
+  render();
+}
+async function saveIndex(){
+  if (loadFailed) throw new Error('Not loaded properly — reopen the app first');
+  index.ids = items.map(i => i.id);
+  await store.set(INDEX_KEY, JSON.stringify(index));
+}
+async function saveItem(it){
+  it.updated = Date.now();
+  await store.set(itemKey(it.id), JSON.stringify(it));
+  if (!items.some(x => x.id === it.id)) items.unshift(it); else items = items.map(x => x.id === it.id ? it : x);
+  index.stamps[it.id] = it.updated;
+  await saveIndex();
+}
+async function deleteItem(id){
+  items = items.filter(x => x.id !== id);
+  delete index.stamps[id];
+  await saveIndex();
+  store.delete(itemKey(id)).catch(() => null);
+}
+// changes made on another phone
+function watch(){
+  store.onChange(INDEX_KEY, async (v) => {
+    if (!v || loadFailed) return;
+    let ix; try { ix = JSON.parse(v); } catch (e) { return; }
+    const known = new Map(items.map(i => [String(i.id), i]));
+    const changed = ix.ids.filter(id => !known.has(String(id)) || (ix.stamps || {})[id] !== (known.get(String(id)).updated));
+    if (!changed.length && ix.ids.length === items.length) return;
+    const fresh = await Promise.all(changed.map(id => store.get(itemKey(id)).then(x => x && x.value ? JSON.parse(x.value) : null).catch(() => null)));
+    const byId = new Map(items.map(i => [String(i.id), i]));
+    fresh.filter(Boolean).forEach(f => byId.set(String(f.id), f));
+    items = ix.ids.map(id => byId.get(String(id))).filter(Boolean);
+    index = Object.assign({ stamps: {} }, ix);
+    render();
+  });
+}
+
+// ---------- list ----------
+function vendors(){ return [...new Set(items.map(i => (i.vendor || '').trim()).filter(Boolean))].sort(); }
+function render(){
+  const vs = vendors();
+  if (vendorFilter && !vs.includes(vendorFilter)) vendorFilter = '';
+  $('vendors').innerHTML = vs.length ? ['<button type="button" class="chip ' + (vendorFilter ? '' : 'on') + '" data-v="">ALL (' + items.length + ')</button>']
+    .concat(vs.map(v => '<button type="button" class="chip ' + (v === vendorFilter ? 'on' : '') + '" data-v="' + esc(v) + '">' + esc(v) + ' (' + items.filter(i => i.vendor === v).length + ')</button>')).join('') : '';
+  $('vendors').querySelectorAll('.chip').forEach(b => b.onclick = () => { vendorFilter = b.dataset.v; render(); });
+  $('vendor-list').innerHTML = vs.map(v => '<option value="' + esc(v) + '">').join('');
+  const q = $('search').value.trim().toLowerCase();
+  const words = q.split(/\s+/).filter(Boolean);
+  const list = items.filter(it => (!vendorFilter || it.vendor === vendorFilter) &&
+    (!words.length || words.every(w => [it.name, it.vendor, it.note, it.link && it.link.catName].concat((it.sizes || []).map(s => s.code)).join(' ').toLowerCase().includes(w))));
+  if (!loadFailed) $('count').textContent = items.length ? (list.length === items.length ? items.length + ' entr' + (items.length === 1 ? 'y' : 'ies') : list.length + ' of ' + items.length + ' entries') : '';
+  $('grid').innerHTML = list.length ? list.map(it => `<div class="pc">
+      ${it.photo ? `<img src="${it.photo}" loading="lazy" alt="">` : '<div style="height:60px; background:#222;"></div>'}
+      <div class="bd">
+        <p class="nm">${esc(it.name)}</p>
+        ${it.vendor ? `<span class="vend">🏭 ${esc(it.vendor)}</span>` : '<span class="vend" style="background:#3a2a10; color:#f5c46b; border-color:#b8912f;">NO VENDOR</span>'}
+        ${(it.sizes || []).map(s => `<div class="sz"><span>${esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard')}${s.mrp ? `<br><span class="mrp">MRP ${esc(money(s.mrp))}</span>` : ''}</span><span class="pp">${money(s.price) || '—'}</span></div>`).join('')}
+        ${it.note ? `<div class="note" style="margin-top:5px;">📝 ${esc(it.note)}</div>` : ''}
+        <div class="note" style="margin-top:5px; font-size:11px;">${it.link ? '🔗 ' + esc(it.link.catName || 'Catalogue') + ' · ' : ''}${esc(fmtDate(it.updated))}</div>
+      </div>
+      <div class="act"><button type="button" data-edit="${it.id}">✏️ Edit</button><button type="button" data-copy="${it.id}">＋ Vendor</button></div>
+    </div>`).join('')
+    : `<div class="empty" style="grid-column:1/-1;">${items.length ? 'Nothing matches.' : 'No purchase prices yet.<br>Tap <b>📒 Add from Catalogue</b> to pick a product, or <b>＋ New item</b>.'}</div>`;
+  $('grid').querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openForm(items.find(i => String(i.id) === b.dataset.edit)));
+  $('grid').querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+    const src = items.find(i => String(i.id) === b.dataset.copy); if (!src) return;
+    openForm(null, { name: src.name, photo: src.photo, link: src.link, note: '', vendor: '', sizes: (src.sizes || []).map(s => ({ code: s.code, inch: s.inch, mrp: s.mrp, price: '' })) });
+  });
+}
+$('search').addEventListener('input', render);
+
+// ---------- add / edit ----------
+let F = null; // { id|null, photo, link, sizes }
+function sizesUi(){
+  $('f-sizes').innerHTML = F.sizes.map((s, k) => `<div class="srow">
+      <input type="text" data-k="${k}" data-f="code" value="${esc(s.code || '')}" placeholder="Size">
+      <input type="text" data-k="${k}" data-f="inch" value="${esc(s.inch || '')}" placeholder="Inch" inputmode="decimal" style="max-width:70px;">
+      <input type="number" data-k="${k}" data-f="price" value="${esc(s.price || '')}" placeholder="Buy ₹" inputmode="decimal" style="max-width:96px; border-color:#2f7a4a;">
+      <button type="button" class="x" data-del="${k}">✕</button></div>
+      ${s.mrp ? `<div class="note" style="margin:2px 0 0 4px;">MRP ${esc(money(s.mrp))} (from catalogue)</div>` : ''}`).join('') || '<div class="note">No sizes — tap ＋ Add size.</div>';
+  $('f-sizes').querySelectorAll('input').forEach(el => el.oninput = () => { F.sizes[el.dataset.k][el.dataset.f] = el.value; });
+  $('f-sizes').querySelectorAll('[data-del]').forEach(b => b.onclick = () => { F.sizes.splice(Number(b.dataset.del), 1); sizesUi(); });
+}
+function openForm(it, preset){
+  const src = it || preset || {};
+  F = { id: it ? it.id : null, photo: src.photo || '', link: src.link || null, sizes: (src.sizes && src.sizes.length ? src.sizes : [{ code: '', inch: '', price: '' }]).map(s => ({ ...s })) };
+  $('f-title').textContent = it ? 'Edit purchase price' : 'Add purchase price';
+  $('f-name').value = src.name || ''; $('f-vendor').value = src.vendor || ''; $('f-note').value = src.note || '';
+  $('f-photo').src = F.photo || ''; $('f-photo').style.display = F.photo ? 'block' : 'none';
+  $('f-photo-btn').textContent = F.photo ? '📷 Change photo' : '📷 Choose photo';
+  $('f-link').textContent = F.link ? '🔗 From Catalogue: ' + (F.link.catName || '') : '';
+  $('f-delete').style.display = it ? 'block' : 'none';
+  sizesUi();
+  $('form-modal').style.display = 'flex'; document.body.style.overflow = 'hidden';
+  setTimeout(() => (src.name ? $('f-vendor') : $('f-name')).focus(), 80);
+}
+function closeForm(){ $('form-modal').style.display = 'none'; document.body.style.overflow = ''; }
+$('f-cancel').onclick = closeForm;
+$('f-add-size').onclick = () => { F.sizes.push({ code: '', inch: '', price: '' }); sizesUi(); };
+$('f-photo-btn').onclick = () => $('f-file').click();
+$('f-file').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { F.photo = await shrinkPhoto(URL.createObjectURL(f), 480); $('f-photo').src = F.photo; $('f-photo').style.display = 'block'; $('f-photo-btn').textContent = '📷 Change photo'; }
+  catch (err) { alert('Could not read that photo.'); }
+};
+function shrinkPhoto(src, max){
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => {
+    const s = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight)), c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(im.naturalWidth * s)); c.height = Math.max(1, Math.round(im.naturalHeight * s));
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(im, 0, 0, c.width, c.height);
+    res(c.toDataURL('image/jpeg', 0.75)); }; im.onerror = rej; im.src = src; });
+}
+$('f-save').onclick = async () => {
+  const name = $('f-name').value.trim(), vendor = $('f-vendor').value.trim();
+  if (!name){ alert('Please enter the model no. / name.'); return; }
+  if (!vendor && !confirm('No vendor name — save anyway?')) return;
+  const sizes = F.sizes.map(s => { const o = { code: String(s.code || '').trim(), inch: String(s.inch || '').trim(), price: String(s.price || '').trim() }; if (s.mrp) o.mrp = s.mrp; return o; }).filter(s => s.code || s.inch || s.price);
+  const dup = items.find(i => i.id !== F.id && i.name.toUpperCase() === name.toUpperCase() && (i.vendor || '').toUpperCase() === vendor.toUpperCase());
+  if (dup && !confirm(name + ' from ' + (vendor || 'no vendor') + ' is already saved. Save another entry anyway?')) return;
+  const old = F.id ? items.find(i => i.id === F.id) : null;
+  const it = Object.assign({}, old || {}, { id: F.id || Date.now(), name, vendor, sizes, note: $('f-note').value.trim(), photo: F.photo || '', link: F.link || null });
+  $('f-save').disabled = true;
+  try { await saveItem(it); closeForm(); render(); toast('✅ Saved ' + name + (vendor ? ' · ' + vendor : '')); }
+  catch (e) { console.error(e); alert('Not saved — check internet and try again.\n' + (e.message || e)); }
+  finally { $('f-save').disabled = false; }
+};
+$('f-delete').onclick = async () => {
+  const it = items.find(i => i.id === F.id); if (!it) return;
+  if (!confirm('Delete ' + it.name + (it.vendor ? ' (' + it.vendor + ')' : '') + '? The Catalogue is not affected.')) return;
+  try { await deleteItem(it.id); closeForm(); render(); toast('Deleted'); } catch (e) { alert('Could not delete — check internet.'); }
+};
+$('new-item').onclick = () => openForm(null, { vendor: vendorFilter || '' });
+
+// ---------- pick from Catalogue ----------
+let cats = [], catCache = {};
+async function loadCatList(){
+  if (cats.length) return cats;
+  const r = await catStore.get('catalogue-list');
+  cats = r && r.value ? JSON.parse(r.value) : [];
+  return cats;
+}
+async function loadCatItems(catId){
+  if (catCache[catId]) return catCache[catId];
+  const ix = await catStore.get('index:' + catId);
+  const ids = ix && ix.value ? JSON.parse(ix.value) : [];
+  const list = (await Promise.all(ids.map(id => catStore.get('item:' + catId + ':' + id).then(r => r && r.value ? JSON.parse(r.value) : null).catch(() => null)))).filter(Boolean);
+  catCache[catId] = list;
+  return list;
+}
+// a product with types (BEST BATSMAN / BEST BOWLER…) appears once per type
+function catEntries(cat, list){
+  const out = [];
+  list.forEach(it => {
+    const types = Array.isArray(it.types) ? it.types.filter(t => t && t.id) : [];
+    out.push({ key: it.id + '', name: it.name + (types.length && it.mainTypeName ? ' ' + it.mainTypeName : ''), photo: it.thumb || it.dataUrl || '', vars: it.variations || [], link: { catId: cat.id, catName: cat.name, itemId: it.id } });
+    types.forEach(t => out.push({ key: it.id + '~' + t.id, name: it.name + ' ' + t.name, photo: t.thumb || it.thumb || '', vars: (t.variations && t.variations.length) ? t.variations : (it.variations || []), link: { catId: cat.id, catName: cat.name, itemId: it.id, typeId: t.id } }));
+  });
+  return out;
+}
+const linkKey = (l) => l ? l.catId + ':' + l.itemId + (l.typeId ? '~' + l.typeId : '') : '';
+function presetFrom(e){ return { name: e.name, photo: e.photo, link: e.link, vendor: vendorFilter || '', sizes: e.vars.filter(v => v.code || v.inch || v.price).map(v => ({ code: v.code || '', inch: v.inch || '', mrp: v.price || '', price: '' })) }; }
+async function renderPick(){
+  const catId = $('p-cat').value, cat = cats.find(c => c.id === catId); if (!cat) return;
+  $('p-status').textContent = '⏳ Loading ' + cat.name + '...';
+  let list; try { list = await loadCatItems(catId); } catch (e) { $('p-status').textContent = '⚠️ Could not load the catalogue — check internet.'; return; }
+  if ($('p-cat').value !== catId) return;
+  const q = $('p-search').value.trim().toLowerCase();
+  const entries = catEntries(cat, list).filter(e => !q || (e.name + ' ' + e.vars.map(v => v.code || '').join(' ')).toLowerCase().includes(q));
+  const have = {}; items.forEach(i => { const k = linkKey(i.link); if (k) (have[k] = have[k] || []).push(i.vendor || '?'); });
+  $('p-status').textContent = entries.length + ' product(s) — tap one to add its purchase price';
+  $('p-grid').innerHTML = entries.slice(0, 300).map((e, i) => `<div class="pi" data-i="${i}">${e.photo ? `<img src="${e.photo}" loading="lazy" alt="">` : '<div style="height:86px; background:#222; border-radius:6px;"></div>'}
+      <div class="t">${esc(e.name)}</div>${have[linkKey(e.link)] ? `<div class="done">✓ ${esc(have[linkKey(e.link)].join(', '))}</div>` : ''}</div>`).join('');
+  $('p-grid').querySelectorAll('.pi').forEach(el => el.onclick = () => { const e = entries[el.dataset.i]; closePick(); openForm(null, presetFrom(e)); });
+}
+async function openPick(){
+  $('pick-modal').style.display = 'flex'; document.body.style.overflow = 'hidden';
+  $('p-status').textContent = '⏳ Loading catalogues...';
+  try { await loadCatList(); } catch (e) { $('p-status').textContent = '⚠️ Could not load catalogues — check internet.'; return; }
+  const keep = $('p-cat').value || localStorage.getItem('pr-last-cat') || (cats[0] && cats[0].id);
+  $('p-cat').innerHTML = cats.map(c => '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>').join('');
+  if (cats.some(c => c.id === keep)) $('p-cat').value = keep;
+  renderPick();
+}
+function closePick(){ $('pick-modal').style.display = 'none'; document.body.style.overflow = ''; }
+$('from-cat').onclick = openPick;
+$('p-close').onclick = closePick;
+$('p-cat').onchange = () => { try { localStorage.setItem('pr-last-cat', $('p-cat').value); } catch (e) {} renderPick(); };
+$('p-search').oninput = () => { clearTimeout(renderPick.t); renderPick.t = setTimeout(renderPick, 200); };
+
+// opened from a Catalogue card: purchase.html?cat=…&item=…&type=…
+async function openFromLink(){
+  const u = new URLSearchParams(location.search);
+  const catId = u.get('cat'), itemId = u.get('item'), typeId = u.get('type') || '';
+  if (!catId || !itemId) return;
+  history.replaceState(null, '', location.pathname);
+  try {
+    await loadCatList();
+    const cat = cats.find(c => c.id === catId) || { id: catId, name: '' };
+    const r = await catStore.get('item:' + catId + ':' + itemId);
+    if (!r || !r.value){ toast('That product was not found in the Catalogue'); return; }
+    const e = catEntries(cat, [JSON.parse(r.value)]).find(x => x.key === itemId + (typeId ? '~' + typeId : ''));
+    if (!e) return;
+    const existing = items.filter(i => linkKey(i.link) === linkKey(e.link));
+    if (existing.length){
+      $('search').value = e.name; render();
+      toast(existing.length + ' purchase price(s) already saved — tap ✏️ Edit, or ＋ Vendor for another vendor');
+    } else openForm(null, presetFrom(e));
+  } catch (err) { console.error(err); toast('Could not open that product — check internet'); }
+}
+
+// ---------- PDF ----------
+$('pdf-btn').onclick = async () => {
+  const { jsPDF } = window.jspdf || {}; if (!jsPDF){ alert('The PDF tool could not load — connect to the internet and reopen.'); return; }
+  const list = items.filter(it => !vendorFilter || it.vendor === vendorFilter).slice().sort((a, b) => (a.vendor || '~').localeCompare(b.vendor || '~') || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!list.length){ alert('Nothing to put in the PDF yet.'); return; }
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' }), W = 210, M = 12;
+  let y = 16, lastVendor = null;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.text('PURCHASE RATES' + (vendorFilter ? ' — ' + vendorFilter : ''), W / 2, y, { align: 'center' }); y += 5;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(110, 110, 110); doc.text('Made ' + new Date().toLocaleDateString('en-IN') + ' · private — not for customers', W / 2, y + 1, { align: 'center' }); y += 8;
+  for (const it of list){
+    const sz = (it.sizes || []).map(s => [s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' ') + '  =  ' + (money(s.price).replace('₹', 'Rs.') || '-') + (s.mrp ? '   (MRP Rs.' + String(s.mrp).replace(/[^0-9.]/g, '') + ')' : ''));
+    const h = Math.max(26, 8 + sz.length * 5 + (it.note ? 5 : 0));
+    if ((it.vendor || '') !== lastVendor){
+      if (y + 10 + h > 285){ doc.addPage(); y = 16; }
+      lastVendor = it.vendor || '';
+      doc.setFillColor(22, 50, 79); doc.rect(M, y, W - 2 * M, 8, 'F'); doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+      doc.text('VENDOR: ' + (lastVendor || 'NOT SET'), M + 3, y + 5.6); y += 11;
+    }
+    if (y + h > 285){ doc.addPage(); y = 16; }
+    doc.setDrawColor(220, 220, 220); doc.rect(M, y, W - 2 * M, h);
+    if (it.photo){ try { doc.addImage(it.photo, 'JPEG', M + 2, y + 2, 22, 22); } catch (e) {} }
+    doc.setTextColor(20, 20, 20); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(it.name, M + 28, y + 7);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+    sz.forEach((t, i) => doc.text(t, M + 28, y + 13 + i * 5));
+    if (it.note){ doc.setTextColor(110, 110, 110); doc.setFontSize(9); doc.text('Note: ' + it.note, M + 28, y + 13 + sz.length * 5); }
+    y += h + 3;
+  }
+  const n = doc.getNumberOfPages();
+  for (let p = 1; p <= n; p++){ doc.setPage(p); doc.setFontSize(8.5); doc.setTextColor(130, 130, 130); doc.text('Page ' + p + ' of ' + n, W / 2, 292, { align: 'center' }); }
+  const name = 'purchase-rates' + (vendorFilter ? '-' + vendorFilter.replace(/[^\w]+/g, '-') : '') + '.pdf';
+  const file = new File([doc.output('blob')], name, { type: 'application/pdf' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: name }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  doc.save(name);
+};
+
+// ---------- backup / restore (never deletes anything) ----------
+$('backup-btn').onclick = () => {
+  const blob = new Blob([JSON.stringify({ type: 'purchase-rates-backup', exportedAt: new Date().toISOString(), items })], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'purchase-rates-backup-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
+};
+$('restore-btn').onclick = () => $('restore-file').click();
+$('restore-file').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  let b; try { b = JSON.parse(await f.text()); } catch (err) { alert('That file could not be read.'); return; }
+  if (!b || b.type !== 'purchase-rates-backup' || !Array.isArray(b.items)){ alert('That is not a Purchase Rates backup.'); return; }
+  if (!confirm('Add / update ' + b.items.length + ' entries from this backup? Entries not in the file are kept.')) return;
+  try {
+    for (const it of b.items){ if (it && it.id != null && it.name){ await store.set(itemKey(it.id), JSON.stringify(it)); index.stamps[it.id] = it.updated || Date.now(); if (!items.some(x => x.id === it.id)) items.push(it); else items = items.map(x => x.id === it.id ? it : x); } }
+    await saveIndex(); render(); toast('✅ Restored ' + b.items.length + ' entries');
+  } catch (err) { alert('Restore stopped — check internet and try again.'); }
+};
+
+document.querySelectorAll('.modal').forEach(m => m.addEventListener('click', (e) => { if (e.target === m){ m.style.display = 'none'; document.body.style.overflow = ''; } }));
+(async () => { await loadAll(); watch(); openFromLink(); })();
+</script>
+
+</body>
+</html>

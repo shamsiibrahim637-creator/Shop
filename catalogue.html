@@ -3941,6 +3941,9 @@ function renderGrid(){
         <div class="row">
           <button class="types-btn" data-id="${item.id}" style="font-size:13px; color:var(--brass-light);">🎨 Types / Photos${types.length ? ' (' + (types.length + 1) + ')' : ''}</button>
         </div>
+        <div class="row">
+          <button class="purchase-btn" data-id="${item.id}" style="font-size:13px; color:#8ab4f8;">🛒 Purchase price</button>
+        </div>
       </div>
     `;
     grid.appendChild(card);
@@ -3986,6 +3989,14 @@ function renderGrid(){
       card.querySelectorAll('.type-chip').forEach(c => { const on = c === btn; c.style.background = on ? 'var(--brass-light)' : 'none'; c.style.color = on ? '#000' : 'var(--brass-light)'; });
       const nm = card.querySelector('.item-body .name');
       if (nm){ const tagSpan = nm.querySelector('span'); nm.textContent = item.name + (t ? ' ' + t.name : (item.mainTypeName ? ' ' + item.mainTypeName : '')); if (tagSpan) nm.prepend(tagSpan); }
+    });
+  });
+
+  __viewRoot.querySelectorAll('.purchase-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-id'));
+      const t = cardTypeSel.get(id) || '';
+      location.href = 'purchase.html?cat=' + encodeURIComponent(currentCatalogueId) + '&item=' + encodeURIComponent(id) + (t ? '&type=' + encodeURIComponent(t) : '');
     });
   });
 
