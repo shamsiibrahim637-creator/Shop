@@ -2141,9 +2141,24 @@ function buildBillPDFDoc(bill){
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(11);
-  if (bill.customerName){ doc.text('Bill To: ' + bill.customerName, 15, y); }
-  if (bill.billMadeBy){ doc.text('Prepared By: ' + bill.billMadeBy, pageWidth-15, y, { align: 'right' }); }
-  if (bill.customerName || bill.billMadeBy) y += 6;
+  // Bill To (can be long) and Prepared By (right side) must never overlap:
+  // if they would collide, wrap Bill To and move Prepared By to its own line.
+  const billToText = bill.customerName ? 'Bill To: ' + bill.customerName : '';
+  const preparedText = bill.billMadeBy ? 'Prepared By: ' + bill.billMadeBy : '';
+  const colW = pageWidth - 30;
+  const billToW = billToText ? doc.getTextWidth(billToText) : 0;
+  const preparedW = preparedText ? doc.getTextWidth(preparedText) : 0;
+  if (billToText && preparedText && billToW + preparedW + 8 > colW){
+    const billLines = doc.splitTextToSize(billToText, colW);
+    doc.text(billLines, 15, y);
+    y += billLines.length * 5.5;
+    doc.text(preparedText, pageWidth-15, y, { align: 'right' });
+    y += 6;
+  } else {
+    if (billToText){ doc.text(billToText, 15, y); }
+    if (preparedText){ doc.text(preparedText, pageWidth-15, y, { align: 'right' }); }
+    if (billToText || preparedText) y += 6;
+  }
   if (bill.customerPhone){ doc.text('Phone: ' + bill.customerPhone, 15, y); y += 6; }
   if (bill.customerGstin){ doc.setFont('helvetica', 'bold'); doc.text('Customer GSTIN: ' + bill.customerGstin, 15, y); doc.setFont('helvetica', 'normal'); y += 6; }
   if (bill.customerAddress){
