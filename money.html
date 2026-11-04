@@ -201,9 +201,9 @@ const BOOKS = {
     outCats: ['Sadaqah', 'Masjid', 'Madrasa', 'Fitra', 'Qurbani', 'Help to needy', 'Orphans', 'Iftar / food', 'Other'] },
   personal: { name: 'Personal', icon: '👤', inLabel: 'Income', outLabel: 'Expense',
     inCats: ['Shop / business', 'Salary', 'Gift', 'Rent received', 'Savings', 'Loan taken', 'Loan returned to me', 'Other'],
-    outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Other'] }
+    outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Savings used', 'Other'] }
 };
-const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
+const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Savings used': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
 
 // ---- tiny local database (IndexedDB) ----
 const DB_NAME = 'shopapp-money';
@@ -245,7 +245,7 @@ function render(){
     ${book === 'zakat' && tAll.in === 0 ? `<div class="big in">${money(tAll.out)}</div><div class="note" style="margin:-6px 0 10px;">Total Zakat paid</div>` : `<div class="big ${tAll.bal < 0 ? 'out' : ''}">${money(tAll.bal)}</div>`}
     <div class="row3"><div><div class="lbl">${B.inLabel} (In)</div><div class="val in">${money(tAll.in)}</div></div><div><div class="lbl">${B.outLabel} (Out)</div><div class="val out">${money(tAll.out)}</div></div></div></div>`;
   if (book === 'zakat') h += zakatCard();
-  if (book === 'personal') h += udhaarCard();
+  if (book === 'personal') h += savingsCard() + udhaarCard();
   // month filter + this-month summary
   h += `<div class="card"><h2>${month === 'all' ? 'All entries' : monthName(month)}</h2>
     <div class="filters"><select id="month-sel"><option value="all">All months</option>${months.map(m => `<option value="${m}" ${m === month ? 'selected' : ''}>${monthName(m)}</option>`).join('')}</select></div>
@@ -313,6 +313,17 @@ function daysTo(d){
   return ' — <span class="out">' + (-diff) + ' days ago</span>';
 }
 function udhPaid(u){ return (u.payments || []).reduce((a, p) => a + Number(p.amount || 0), 0); }
+// Total savings in hand = money put into Savings − Savings used (Personal book only)
+function savingsInHand(){
+  const sv = state.entries.filter(e => e.book === 'personal' && e.category === 'Savings' && e.type === 'in').reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const used = state.entries.filter(e => e.book === 'personal' && e.category === 'Savings used' && e.type === 'out').reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  return Math.round((sv - used) * 100) / 100;
+}
+function savingsCard(){
+  return `<div class="card bal"><div class="lbl" style="color:var(--muted); font-weight:700; font-size:13px;">🏦 Total savings in hand</div>
+    <div class="big ${savingsInHand() < 0 ? 'out' : 'in'}">${money(savingsInHand())}</div>
+    <div class="note" style="margin:-6px 0 4px;">Savings received + Savings put in, minus Savings used (choose "Savings used" when you spend savings)</div></div>`;
+}
 function udhLeft(u){ return Math.max(0, Math.round((Number(u.amount || 0) - udhPaid(u)) * 100) / 100); }
 let showSettled = false;
 function udhaarCard(){
