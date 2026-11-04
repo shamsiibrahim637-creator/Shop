@@ -952,7 +952,7 @@ window.__switchView = function(){};
         </div>
         <div class="field">
           <label>Address</label>
-          <input type="text" id="shop-address" placeholder="Shop address">
+          <textarea id="shop-address" rows="2" placeholder="Shop address" style="width:100%;padding:12px;border-radius:6px;border:1.5px solid var(--line);background:var(--navy);color:var(--cream);font-family:Arial,sans-serif;font-weight:700;font-size:16px;resize:vertical;"></textarea>
         </div>
         <div class="field">
           <label>Your GST Number (optional)</label>
@@ -1013,7 +1013,7 @@ window.__switchView = function(){};
     <div class="row2">
       <div class="field">
         <label>Customer Address (optional)</label>
-        <input type="text" id="customer-address" placeholder="Address (optional)">
+        <textarea id="customer-address" rows="2" placeholder="Address (optional)" style="width:100%;padding:12px;border-radius:6px;border:1.5px solid var(--line);background:var(--navy);color:var(--cream);font-family:Arial,sans-serif;font-weight:700;font-size:16px;resize:vertical;"></textarea>
       </div>
       <div class="field">
         <label>Bill Made By</label>
@@ -2123,7 +2123,12 @@ function buildBillPDFDoc(bill){
   doc.setFontSize(10);
   doc.setTextColor(90,90,90);
   const shopLine = [shopSettings.address, shopSettings.phone].filter(Boolean).join('   |   ');
-  if (shopLine){ doc.text(shopLine, pageWidth/2, y, { align: 'center' }); y += 6; }
+  if (shopLine){
+    // long shop address wraps inside the page instead of running off the edges
+    const shopLines = doc.splitTextToSize(shopLine, pageWidth - 30);
+    shopLines.forEach(function(ln){ doc.text(ln, pageWidth/2, y, { align: 'center' }); y += 5; });
+    y += 1;
+  }
   if (shopSettings.gstin){ doc.setFont('helvetica', 'bold'); doc.setTextColor(40,40,40); doc.text('GSTIN: ' + shopSettings.gstin, pageWidth/2, y, { align: 'center' }); doc.setFont('helvetica', 'normal'); y += 6; }
 
   y += 4;
