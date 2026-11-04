@@ -185,6 +185,8 @@
   <input type="password" id="lock-pin" inputmode="numeric" maxlength="8" placeholder="PIN" style="max-width:240px; text-align:center; font-size:24px; letter-spacing:6px;">
   <button class="btn gold" id="lock-go" style="margin-top:12px; width:240px;">Unlock</button>
   <div id="lock-err" style="color:var(--out); font-weight:700; margin-top:10px; min-height:18px;"></div>
+  <button class="btn ghost" id="lock-forgot" style="margin-top:14px; width:240px;">Forgot PIN?</button>
+  <div style="color:var(--muted,#999); font-size:13px; max-width:280px; margin-top:8px;">Resetting removes only the PIN. All your money entries stay on this phone.</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -569,6 +571,12 @@ $('lock-go').onclick = () => {
   else { $('lock-err').textContent = 'Wrong PIN'; $('lock-pin').value = ''; }
 };
 $('lock-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lock-go').onclick(); });
+$('lock-forgot').onclick = () => {
+  if (!confirm('Reset the PIN? Your money entries will NOT be deleted. You can set a new PIN afterwards.')) return;
+  try { localStorage.removeItem('money-pin'); } catch (e) {}
+  $('lock').style.display = 'none'; $('lock-err').textContent = '';
+  toast('PIN removed. Set a new one from the menu if you want.');
+};
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && getPin()) lockIfNeeded(); });
 
 // ---- "Add to Home Screen" + offline ----
