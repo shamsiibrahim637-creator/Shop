@@ -200,10 +200,10 @@ const BOOKS = {
     inCats: ['Kept aside (Lillah)', 'Mannat', 'Received for charity', 'Other'],
     outCats: ['Sadaqah', 'Masjid', 'Madrasa', 'Fitra', 'Qurbani', 'Help to needy', 'Orphans', 'Iftar / food', 'Other'] },
   personal: { name: 'Personal', icon: '👤', inLabel: 'Income', outLabel: 'Expense',
-    inCats: ['Shop / business', 'Salary', 'Gift', 'Rent received', 'Loan taken', 'Loan returned to me', 'Other'],
+    inCats: ['Shop / business', 'Salary', 'Gift', 'Rent received', 'Savings', 'Loan taken', 'Loan returned to me', 'Other'],
     outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Other'] }
 };
-const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
+const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
 
 // ---- tiny local database (IndexedDB) ----
 const DB_NAME = 'shopapp-money';
@@ -480,7 +480,7 @@ $('pay-save').onclick = async () => {
   const date = $('pay-date').value || today(), mode = $('pay-mode').value, note = $('pay-note').value.trim(), entryId = newId();
   u.payments = u.payments || [];
   u.payments.push({ id: newId(), amount, date, mode, note, entryId });
-  state.entries.push({ id: entryId, created: Date.now(), book: 'personal', type: u.kind === 'lent' ? 'in' : 'out', amount, category: u.kind === 'lent' ? 'Loan returned to me' : 'Loan repaid by me', date, mode, person: u.person, note: (udhLeft(u) <= 0 ? 'Udhaar fully settled' : 'Udhaar part payment') + (note ? ' · ' + note : ''), udhaarId: u.id });
+  state.entries.push({ id: entryId, created: Date.now(), book: 'personal', type: u.kind === 'lent' ? 'in' : 'out', amount, category: u.kind === 'lent' ? 'Savings' : 'Loan repaid by me', date, mode, person: u.person, note: (udhLeft(u) <= 0 ? 'Udhaar fully settled' : 'Udhaar part payment') + (note ? ' · ' + note : ''), udhaarId: u.id });
   localStorage.setItem('money-mode', mode);
   const nowLeft = udhLeft(u);
   if (nowLeft <= 0){ u.settled = true; u.settledDate = date; }
