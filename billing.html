@@ -2259,7 +2259,8 @@ function buildBillPDFDoc(bill){
   const pdfAdvance = parseFloat(bill.advance) || 0;
   const pdfRoundOff = parseFloat(bill.roundOff) || 0;
   const pdfOld = billOldBalance(bill);
-  if (y + 105 + 26 + (pdfOld > 0 ? 14 : 0) + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
+  const pdfPieces = bill.items.reduce((a, it) => a + (Number(it.qty) || 0), 0);
+  if (y + 111 + 26 + (pdfOld > 0 ? 14 : 0) + (pdfAdvance > 0 ? 14 : 0) + (pdfRoundOff ? 6 : 0) + (bill.transportName ? 6 : 0) > bottomLimit){
     doc.addPage();
     y = 20;
   }
@@ -2269,8 +2270,13 @@ function buildBillPDFDoc(bill){
   doc.line(120, y, pageWidth-15, y);
   y += 7;
 
-  doc.setFont('helvetica', 'normal');
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
+  doc.text('Total Pieces:', 130, y);
+  doc.text(String(Math.round(pdfPieces*100)/100), pageWidth-18, y, { align: 'right' });
+  y += 6;
+
+  doc.setFont('helvetica', 'normal');
   doc.text('Subtotal:', 130, y);
   doc.text(String(Math.round(bill.subtotal*100)/100), pageWidth-18, y, { align: 'right' });
   y += 6;
