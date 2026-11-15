@@ -194,6 +194,9 @@
 <script>
 // ===================== Money (kept only on this phone) =====================
 const BOOKS = {
+  simple: { name: 'Simple', icon: '🏠', inLabel: 'In', outLabel: 'Out',
+    inCats: ['Capital in hand', 'Other'],
+    outCats: ['Personal use', 'Buy gold', 'Balance reset', 'Other'] },
   zakat: { name: 'Zakat', icon: '🕌', inLabel: 'Set aside', outLabel: 'Paid',
     inCats: ['Zakat set aside', 'Business profit', 'Savings', 'Other'],
     outCats: ['Poor & needy', 'Relative in need', 'Madrasa student', 'Debt relief', 'Traveller in need', 'Other'] },
@@ -254,8 +257,10 @@ function render(){
     ${month !== 'all' ? `<div class="row3" style="margin-bottom:8px;"><div><div class="lbl">In</div><div class="val in">${money(tShown.in)}</div></div><div><div class="lbl">Out</div><div class="val out">${money(tShown.out)}</div></div><div><div class="lbl">Net</div><div class="val">${money(tShown.bal)}</div></div></div>` : ''}
     ${listHtml(shown)}</div>`;
   h += reportCard(shown, all);
+  if (book === 'personal') h += `<div class="card"><button class="btn ghost" id="p-wipe" style="width:100%; color:var(--out); border-color:var(--out);">🗑 Delete all Personal entries</button><div class="note" style="margin-top:6px;">Deletes every Personal entry and Udhaar record. Simple is not affected.</div></div>`;
   $('view').innerHTML = h;
   $('month-sel').onchange = (e) => { month = e.target.value; render(); };
+  const pw = $('p-wipe'); if (pw) pw.onclick = wipePersonal;
   document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
   const zc = $('zk-open'); if (zc) zc.onclick = openZakat;
   const ua = $('udh-add'); if (ua) ua.onclick = () => openUdhaar();
@@ -353,7 +358,7 @@ function udhaarCard(){
 // ---- Simple view (home): money in hand, capital, personal use, gold — all with date ----
 const SIMPLE_CATS = ['Capital in hand', 'Personal use', 'Buy gold', 'Balance reset'];
 function renderSimple(){
-  const P = state.entries.filter(e => e.book === 'personal');
+  const P = state.entries.filter(e => e.book === 'simple');
   const sum = (cat) => P.filter(e => e.category === cat && e.type === (cat === 'Capital in hand' ? 'in' : 'out')).reduce((a, e) => a + (Number(e.amount) || 0), 0);
   const inHand = totals(P).bal;
   const recent = P.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
@@ -379,7 +384,7 @@ function renderSimple(){
     const bal = totals(P).bal;
     if (Math.abs(bal) < 0.005){ toast('Money in hand is already zero'); return; }
     if (!confirm('Make money in hand zero?\n\nThis adds one entry "Balance reset" of ' + money(Math.abs(bal)) + ' dated today. Your old entries are NOT deleted, and you can delete this entry from Recent.')) return;
-    state.entries.push({ id: newId(), created: Date.now(), book: 'personal', type: bal > 0 ? 'out' : 'in', amount: Math.round(Math.abs(bal) * 100) / 100, category: 'Balance reset', date: today(), mode: 'Cash', person: '', note: 'Money in hand set to zero' });
+    state.entries.push({ id: newId(), created: Date.now(), book: 'simple', type: bal > 0 ? 'out' : 'in', amount: Math.round(Math.abs(bal) * 100) / 100, category: 'Balance reset', date: today(), mode: 'Cash', person: '', note: 'Money in hand set to zero' });
     await save(); toast('✅ Money in hand is now zero'); render();
   };
   document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
@@ -388,7 +393,7 @@ function simpleAdd(type, cat){ openEntry(type); em.cat = cat; syncType(); }
 
 // ---- add / edit entry ----
 let em = { id: null, type: 'out', cat: '' };
-function curBook(){ return book === 'simple' ? 'personal' : book; }
+function curBook(){ return book; }
 function openEntry(type, id){
   const e = id ? state.entries.find(x => x.id === id) : null;
   em = { id: e ? e.id : null, type: e ? e.type : type, cat: e ? e.category : '' };
@@ -538,6 +543,16 @@ $('pay-save').onclick = async () => {
   toast(nowLeft <= 0 ? '✅ Fully settled with ' + u.person : '✅ Saved — still left ' + money(nowLeft));
   render();
 };
+async function wipePersonal(){
+  const n = state.entries.filter(e => e.book === 'personal').length, u = (state.udhaar || []).length;
+  if (!n && !u){ toast('No Personal entries to delete'); return; }
+  const name = 'money-backup-before-delete-' + today() + '.json';
+  download(name, JSON.stringify({ type: 'money-app-backup', version: 1, exportedAt: new Date().toISOString(), state }), 'application/json');
+  if (!confirm('A backup file was downloaded to your phone.\n\nDELETE ' + n + ' Personal entries and ' + u + ' Udhaar records now? This cannot be undone.')) return;
+  state.entries = state.entries.filter(e => e.book !== 'personal');
+  state.udhaar = [];
+  await save(); toast('🗑 Personal entries deleted'); render();
+}
 async function deletePayment(pid){
   const u = payU; if (!u) return;
   const p = (u.payments || []).find(x => x.id === pid); if (!p) return;
