@@ -356,7 +356,7 @@ function renderSimple(){
   const P = state.entries.filter(e => e.book === 'personal');
   const sum = (cat) => P.filter(e => e.category === cat && e.type === (cat === 'Capital in hand' ? 'in' : 'out')).reduce((a, e) => a + (Number(e.amount) || 0), 0);
   const inHand = totals(P).bal;
-  const recent = P.filter(e => SIMPLE_CATS.includes(e.category)).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
+  const recent = P.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
   $('view').innerHTML = `
     <div class="card bal"><div class="lbl" style="color:var(--muted); font-weight:700; font-size:13px;">💵 MONEY IN HAND</div>
       <div class="big ${inHand < 0 ? 'out' : ''}">${money(inHand)}</div></div>
