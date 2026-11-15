@@ -204,7 +204,7 @@ const BOOKS = {
     inCats: ['Capital in hand', 'Shop / business', 'Salary', 'Gift', 'Rent received', 'Savings', 'Loan taken', 'Loan returned to me', 'Other'],
     outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Personal use', 'Buy gold', 'Savings used', 'Other'] }
 };
-const CAT_ICON = { 'Capital in hand': '💵', 'Personal use': '🛍', 'Buy gold': '🥇', 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Savings used': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
+const CAT_ICON = { 'Balance reset': '🔄', 'Capital in hand': '💵', 'Personal use': '🛍', 'Buy gold': '🥇', 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Savings used': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
 
 // ---- tiny local database (IndexedDB) ----
 const DB_NAME = 'shopapp-money';
@@ -351,7 +351,7 @@ function udhaarCard(){
 }
 
 // ---- Simple view (home): money in hand, capital, personal use, gold — all with date ----
-const SIMPLE_CATS = ['Capital in hand', 'Personal use', 'Buy gold'];
+const SIMPLE_CATS = ['Capital in hand', 'Personal use', 'Buy gold', 'Balance reset'];
 function renderSimple(){
   const P = state.entries.filter(e => e.book === 'personal');
   const sum = (cat) => P.filter(e => e.category === cat && e.type === (cat === 'Capital in hand' ? 'in' : 'out')).reduce((a, e) => a + (Number(e.amount) || 0), 0);
@@ -369,11 +369,19 @@ function renderSimple(){
       <button class="btn in" id="s-cap" style="width:100%; margin-bottom:8px;">＋ Capital in hand</button>
       <button class="btn out" id="s-use" style="width:100%; margin-bottom:8px;">－ Personal use (expense)</button>
       <button class="btn gold" id="s-gold" style="width:100%;">🥇 Buy gold</button>
+      <button class="btn ghost" id="s-zero" style="width:100%; margin-top:8px;">🔄 Make money in hand zero</button>
     </div>
     <div class="card"><h2>Recent</h2>${listHtml(recent)}</div>`;
   $('s-cap').onclick = () => simpleAdd('in', 'Capital in hand');
   $('s-use').onclick = () => simpleAdd('out', 'Personal use');
   $('s-gold').onclick = () => simpleAdd('out', 'Buy gold');
+  $('s-zero').onclick = async () => {
+    const bal = totals(P).bal;
+    if (Math.abs(bal) < 0.005){ toast('Money in hand is already zero'); return; }
+    if (!confirm('Make money in hand zero?\n\nThis adds one entry "Balance reset" of ' + money(Math.abs(bal)) + ' dated today. Your old entries are NOT deleted, and you can delete this entry from Recent.')) return;
+    state.entries.push({ id: newId(), created: Date.now(), book: 'personal', type: bal > 0 ? 'out' : 'in', amount: Math.round(Math.abs(bal) * 100) / 100, category: 'Balance reset', date: today(), mode: 'Cash', person: '', note: 'Money in hand set to zero' });
+    await save(); toast('✅ Money in hand is now zero'); render();
+  };
   document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
 }
 function simpleAdd(type, cat){ openEntry(type); em.cat = cat; syncType(); }
