@@ -237,6 +237,7 @@ function totals(list){ let i = 0, o = 0; list.forEach(e => { if (e.type === 'in'
 function render(){
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.book === book));
   if (book === 'simple'){ renderSimple(); return; }
+  if (book === 'zakat' || book === 'allah'){ renderBookSimple(book); return; }
   const B = BOOKS[book];
   const all = bookEntries(book).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
   const months = [...new Set(all.map(e => (e.date || '').slice(0, 7)).filter(Boolean))];
@@ -386,6 +387,30 @@ function renderSimple(){
     state.entries.push({ id: newId(), created: Date.now(), book: 'simple', type: bal > 0 ? 'out' : 'in', amount: Math.round(Math.abs(bal) * 100) / 100, category: 'Balance reset', date: today(), mode: 'Cash', person: '', note: 'Money in hand set to zero' });
     await save(); toast('✅ Money in hand is now zero'); render();
   };
+  document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
+}
+// Simple layout for Zakat and In the Name of Allah (same as Personal entry)
+function renderBookSimple(bk){
+  const B = BOOKS[bk];
+  const E = state.entries.filter(e => e.book === bk).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
+  const t = totals(E);
+  $('view').innerHTML = `
+    <div class="card bal"><div class="lbl" style="color:var(--muted); font-weight:700; font-size:13px;">${B.icon} ${esc(B.name)} — BALANCE</div>
+      <div class="big ${t.bal < 0 ? 'out' : ''}">${money(t.bal)}</div></div>
+    <div class="row3">
+      <div><div class="lbl">${esc(B.inLabel)}</div><div class="val in">${money(t.in)}</div></div>
+      <div><div class="lbl">${esc(B.outLabel)}</div><div class="val out">${money(t.out)}</div></div>
+      <div></div>
+    </div>
+    <div class="card"><h2>Add</h2>
+      <button class="btn in" id="bs-in" style="width:100%; margin-bottom:8px;">＋ ${esc(B.inLabel)}</button>
+      <button class="btn out" id="bs-out" style="width:100%;">－ ${esc(B.outLabel)}</button>
+      ${bk === 'zakat' ? '<button class="btn ghost" id="bs-zk" style="width:100%; margin-top:8px;">🧮 Zakat calculator</button>' : ''}
+    </div>
+    <div class="card"><h2>Recent</h2>${listHtml(E)}</div>`;
+  $('bs-in').onclick = () => openEntry('in');
+  $('bs-out').onclick = () => openEntry('out');
+  const zk = $('bs-zk'); if (zk) zk.onclick = openZakat;
   document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
 }
 function simpleAdd(type, cat){ openEntry(type); em.cat = cat; syncType(); }
