@@ -560,6 +560,39 @@ function watch(){
   });
 }
 
+// ---------- stock from the Catalogue (read-only: shows Out of Stock marks) ----------
+const stockCache = new Map(); // "catId:itemId" -> catalogue item record (or null if deleted)
+const stockPending = new Set();
+const catKey = (l) => l.catId + ':' + l.itemId;
+async function fetchCatItem(l){
+  const k = catKey(l);
+  const r = await catStore.get('item:' + l.catId + ':' + l.itemId); // throws if offline -> not cached
+  stockCache.set(k, r && r.value ? JSON.parse(r.value) : null);
+  return stockCache.get(k);
+}
+function ensureStock(){
+  items.forEach(it => {
+    if (!it.link || !it.link.catId || !it.link.itemId) return;
+    const k = catKey(it.link);
+    if (stockCache.has(k) || stockPending.has(k)) return;
+    stockPending.add(k);
+    fetchCatItem(it.link).then(() => { stockPending.delete(k); render(); }).catch(() => stockPending.delete(k));
+  });
+}
+function outKey(v){ return String(v.code || '').trim().toUpperCase() + '|' + String(v.inch || '').trim(); }
+// returns { outKeys:Set, allOut:bool } from the linked Catalogue product (its type's own sizes if it has a type)
+function catStock(it){
+  if (!it.link || !it.link.catId) return null;
+  const ci = stockCache.get(catKey(it.link)); if (!ci) return null;
+  let vars = ci.variations || [];
+  const t = it.link.typeId ? (ci.types || []).find(x => x.id === it.link.typeId) : null;
+  if (t && Array.isArray(t.variations) && t.variations.length) vars = t.variations;
+  const valid = vars.filter(v => v.code || v.inch || v.price);
+  return { outKeys: new Set(vars.filter(v => v.outOfStock).map(outKey)), allOut: valid.length > 0 && valid.every(v => v.outOfStock) };
+}
+// when the phone comes back to the app, re-check the Catalogue stock
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && items.length){ stockCache.clear(); ensureStock(); } });
+
 // ---------- list ----------
 function vendors(){ return [...new Set(items.map(i => (i.vendor || '').trim()).filter(Boolean))].sort(); }
 function render(){
@@ -574,18 +607,20 @@ function render(){
   const list = items.filter(it => (!vendorFilter || it.vendor === vendorFilter) &&
     (!words.length || words.every(w => [it.name, it.vendor, it.note, it.link && it.link.catName].concat((it.sizes || []).map(s => s.code)).join(' ').toLowerCase().includes(w))));
   if (!loadFailed) $('count').textContent = items.length ? (list.length === items.length ? items.length + ' entr' + (items.length === 1 ? 'y' : 'ies') : list.length + ' of ' + items.length + ' entries') : '';
-  $('grid').innerHTML = list.length ? list.map(it => `<div class="pc">
+  $('grid').innerHTML = list.length ? list.map(it => { const st = catStock(it); return `<div class="pc">
       ${it.photo ? `<img src="${it.photo}" loading="lazy" alt="">` : '<div style="height:60px; background:#222;"></div>'}
       <div class="bd">
         <p class="nm">${esc(it.name)}</p>
+        ${st && st.allOut ? '<span class="vend" style="background:#4a1212; color:#ff8a7a; border-color:#a33;">⛔ OUT OF STOCK (Catalogue)</span>' : ''}
         ${it.vendor ? `<span class="vend">🏭 ${esc(it.vendor)}</span>` : '<span class="vend" style="background:#3a2a10; color:#f5c46b; border-color:#b8912f;">NO VENDOR</span>'}
-        ${(it.sizes || []).map(s => `<div class="sz"><span>${esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard')}${s.mrp ? `<br><span class="mrp">MRP ${esc(money(s.mrp))}</span>` : ''}</span><span class="pp">${money(s.price) || '—'}</span></div>`).join('')}
+        ${(it.sizes || []).map(s => { const so = !!(st && st.outKeys.has(outKey(s))); return `<div class="sz"${so ? ' style="opacity:0.6;"' : ''}><span>${esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard')}${s.mrp ? `<br><span class="mrp">MRP ${esc(money(s.mrp))}</span>` : ''}${so ? '<br><b style="color:#ff6b5b;">⛔ OUT OF STOCK</b>' : ''}</span><span class="pp">${money(s.price) || '—'}</span></div>`; }).join('')}
         ${it.note ? `<div class="note" style="margin-top:5px;">📝 ${esc(it.note)}</div>` : ''}
         <div class="note" style="margin-top:5px; font-size:11px;">${it.link ? '🔗 ' + esc(it.link.catName || 'Catalogue') + ' · ' : ''}${esc(fmtDate(it.updated))}</div>
       </div>
       <div class="act"><button type="button" data-edit="${it.id}">✏️ Edit</button><button type="button" data-copy="${it.id}">＋ Vendor</button></div>
-    </div>`).join('')
+    </div>`; }).join('')
     : `<div class="empty" style="grid-column:1/-1;">${items.length ? 'Nothing matches.' : 'No purchase prices yet.<br>Tap <b>📒 Add from Catalogue</b> to pick a product, or <b>＋ New item</b>.'}</div>`;
+  ensureStock();
   $('grid').querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openForm(items.find(i => String(i.id) === b.dataset.edit)));
   $('grid').querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
     const src = items.find(i => String(i.id) === b.dataset.copy); if (!src) return;
