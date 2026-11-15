@@ -83,10 +83,9 @@
 
 <div class="wrap">
   <div class="tabs">
-    <button class="tab" data-book="simple">🏠<br>Simple</button>
+    <button class="tab" data-book="simple">👤<br>Personal entry</button>
     <button class="tab" data-book="zakat">🕌<br>Zakat</button>
     <button class="tab" data-book="allah">🤲<br>In the Name of Allah</button>
-    <button class="tab" data-book="personal">👤<br>Personal</button>
   </div>
   <div id="view"></div>
 </div>
@@ -194,7 +193,7 @@
 <script>
 // ===================== Money (kept only on this phone) =====================
 const BOOKS = {
-  simple: { name: 'Simple', icon: '🏠', inLabel: 'In', outLabel: 'Out',
+  simple: { name: 'Personal entry', icon: '👤', inLabel: 'In', outLabel: 'Out',
     inCats: ['Capital in hand', 'Other'],
     outCats: ['Personal use', 'Buy gold', 'Balance reset', 'Other'] },
   zakat: { name: 'Zakat', icon: '🕌', inLabel: 'Set aside', outLabel: 'Paid',
@@ -668,7 +667,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   if (!state.zakat.calc) state.zakat.calc = {};
   migrateUdhaar();
   book = localStorage.getItem('money-book') || 'simple';
-  if (!BOOKS[book] && book !== 'simple') book = 'simple';
+  if (!['simple', 'zakat', 'allah'].includes(book)) book = 'simple';
   render();
   if (state.entries.length >= 10 && (!state.lastBackup || Date.now() - state.lastBackup > 30 * 86400000)) setTimeout(() => toast('💾 Tip: take a backup from ⚙️'), 1500);
 })();
