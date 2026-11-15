@@ -83,6 +83,7 @@
 
 <div class="wrap">
   <div class="tabs">
+    <button class="tab" data-book="simple">🏠<br>Simple</button>
     <button class="tab" data-book="zakat">🕌<br>Zakat</button>
     <button class="tab" data-book="allah">🤲<br>In the Name of Allah</button>
     <button class="tab" data-book="personal">👤<br>Personal</button>
@@ -200,10 +201,10 @@ const BOOKS = {
     inCats: ['Kept aside (Lillah)', 'Mannat', 'Received for charity', 'Other'],
     outCats: ['Sadaqah', 'Masjid', 'Madrasa', 'Fitra', 'Qurbani', 'Help to needy', 'Orphans', 'Iftar / food', 'Other'] },
   personal: { name: 'Personal', icon: '👤', inLabel: 'Income', outLabel: 'Expense',
-    inCats: ['Shop / business', 'Salary', 'Gift', 'Rent received', 'Savings', 'Loan taken', 'Loan returned to me', 'Other'],
-    outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Savings used', 'Other'] }
+    inCats: ['Capital in hand', 'Shop / business', 'Salary', 'Gift', 'Rent received', 'Savings', 'Loan taken', 'Loan returned to me', 'Other'],
+    outCats: ['Food & grocery', 'Home & rent', 'Bills (light, phone)', 'Travel & fuel', 'Shopping', 'Medical', 'Education', 'Family', 'Loan given', 'Loan repaid by me', 'Personal use', 'Buy gold', 'Savings used', 'Other'] }
 };
-const CAT_ICON = { 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Savings used': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
+const CAT_ICON = { 'Capital in hand': '💵', 'Personal use': '🛍', 'Buy gold': '🥇', 'Food & grocery': '🛒', 'Home & rent': '🏠', 'Bills (light, phone)': '💡', 'Travel & fuel': '⛽', 'Shopping': '🛍', 'Medical': '💊', 'Education': '📚', 'Family': '👨‍👩‍👧', 'Masjid': '🕌', 'Madrasa': '📖', 'Fitra': '🌙', 'Qurbani': '🐐', 'Sadaqah': '🤲', 'Salary': '💼', 'Shop / business': '🏪', 'Gift': '🎁', 'Savings': '🏦', 'Savings used': '🏦', 'Loan given': '🤝', 'Loan taken': '🤝', 'Loan returned to me': '🤝', 'Loan repaid by me': '🤝' };
 
 // ---- tiny local database (IndexedDB) ----
 const DB_NAME = 'shopapp-money';
@@ -233,6 +234,7 @@ function totals(list){ let i = 0, o = 0; list.forEach(e => { if (e.type === 'in'
 // ---- rendering ----
 function render(){
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.book === book));
+  if (book === 'simple'){ renderSimple(); return; }
   const B = BOOKS[book];
   const all = bookEntries(book).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
   const months = [...new Set(all.map(e => (e.date || '').slice(0, 7)).filter(Boolean))];
@@ -348,12 +350,41 @@ function udhaarCard(){
     ${done.length ? `<button class="btn ghost" id="udh-toggle" style="width:100%; margin-top:8px; font-size:13px;">${showSettled ? 'Hide' : 'Show'} settled (${done.length})</button>${showSettled ? done.map(row).join('') : ''}` : ''}</div>`;
 }
 
+// ---- Simple view (home): money in hand, capital, personal use, gold — all with date ----
+const SIMPLE_CATS = ['Capital in hand', 'Personal use', 'Buy gold'];
+function renderSimple(){
+  const P = state.entries.filter(e => e.book === 'personal');
+  const sum = (cat) => P.filter(e => e.category === cat && e.type === (cat === 'Capital in hand' ? 'in' : 'out')).reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const inHand = totals(P).bal;
+  const recent = P.filter(e => SIMPLE_CATS.includes(e.category)).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
+  $('view').innerHTML = `
+    <div class="card bal"><div class="lbl" style="color:var(--muted); font-weight:700; font-size:13px;">💵 MONEY IN HAND</div>
+      <div class="big ${inHand < 0 ? 'out' : ''}">${money(inHand)}</div></div>
+    <div class="row3">
+      <div><div class="lbl">Capital added</div><div class="val in">${money(sum('Capital in hand'))}</div></div>
+      <div><div class="lbl">Personal use</div><div class="val out">${money(sum('Personal use'))}</div></div>
+      <div><div class="lbl">Gold bought</div><div class="val out">${money(sum('Buy gold'))}</div></div>
+    </div>
+    <div class="card"><h2>Add</h2>
+      <button class="btn in" id="s-cap" style="width:100%; margin-bottom:8px;">＋ Capital in hand</button>
+      <button class="btn out" id="s-use" style="width:100%; margin-bottom:8px;">－ Personal use (expense)</button>
+      <button class="btn gold" id="s-gold" style="width:100%;">🥇 Buy gold</button>
+    </div>
+    <div class="card"><h2>Recent</h2>${listHtml(recent)}</div>`;
+  $('s-cap').onclick = () => simpleAdd('in', 'Capital in hand');
+  $('s-use').onclick = () => simpleAdd('out', 'Personal use');
+  $('s-gold').onclick = () => simpleAdd('out', 'Buy gold');
+  document.querySelectorAll('.entry[data-id]').forEach(el => el.onclick = () => openEntry(null, Number(el.dataset.id)));
+}
+function simpleAdd(type, cat){ openEntry(type); em.cat = cat; syncType(); }
+
 // ---- add / edit entry ----
 let em = { id: null, type: 'out', cat: '' };
+function curBook(){ return book === 'simple' ? 'personal' : book; }
 function openEntry(type, id){
   const e = id ? state.entries.find(x => x.id === id) : null;
   em = { id: e ? e.id : null, type: e ? e.type : type, cat: e ? e.category : '' };
-  $('em-title').textContent = (e ? 'Edit' : 'New') + ' — ' + BOOKS[book].icon + ' ' + BOOKS[book].name;
+  $('em-title').textContent = (e ? 'Edit' : 'New') + ' — ' + BOOKS[curBook()].icon + ' ' + BOOKS[curBook()].name;
   $('em-amount').value = e ? e.amount : '';
   $('em-date').value = e ? e.date : today();
   $('em-mode').value = e ? (e.mode || 'Cash') : (localStorage.getItem('money-mode') || 'Cash');
@@ -368,7 +399,7 @@ function openEntry(type, id){
 function syncType(){
   $('em-type-in').className = em.type === 'in' ? 'on-in' : '';
   $('em-type-out').className = em.type === 'out' ? 'on-out' : '';
-  const cats = em.type === 'in' ? BOOKS[book].inCats : BOOKS[book].outCats;
+  const cats = em.type === 'in' ? BOOKS[curBook()].inCats : BOOKS[curBook()].outCats;
   if (em.cat && !cats.includes(em.cat)){ $('em-cat-other').style.display = 'block'; $('em-cat-other').value = em.cat; }
   $('em-cats').innerHTML = cats.map(c => `<button type="button" class="chip ${c === em.cat || (c === 'Other' && em.cat && !cats.includes(em.cat)) ? 'on' : ''}" data-c="${esc(c)}">${CAT_ICON[c] || ''} ${esc(c)}</button>`).join('');
   $('em-cats').querySelectorAll('.chip').forEach(b => b.onclick = () => { em.cat = b.dataset.c; $('em-cat-other').style.display = em.cat === 'Other' ? 'block' : 'none'; syncType(); });
@@ -382,7 +413,7 @@ $('em-save').onclick = async () => {
   if (amount <= 0){ alert('Please enter the amount.'); return; }
   let cat = em.cat;
   if (cat === 'Other' || !cat){ cat = $('em-cat-other').value.trim() || (cat || 'Other'); }
-  const data = { book, type: em.type, amount, category: cat, date: $('em-date').value || today(), mode: $('em-mode').value, person: $('em-person').value.trim(), note: $('em-note').value.trim() };
+  const data = { book: curBook(), type: em.type, amount, category: cat, date: $('em-date').value || today(), mode: $('em-mode').value, person: $('em-person').value.trim(), note: $('em-note').value.trim() };
   localStorage.setItem('money-mode', data.mode);
   if (em.id){ const i = state.entries.findIndex(x => x.id === em.id); if (i >= 0) state.entries[i] = Object.assign({}, state.entries[i], data); }
   else state.entries.push(Object.assign({ id: newId(), created: Date.now() }, data));
@@ -613,8 +644,8 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   if (!state.zakat) state.zakat = { calc: {}, due: null };
   if (!state.zakat.calc) state.zakat.calc = {};
   migrateUdhaar();
-  book = localStorage.getItem('money-book') || 'personal';
-  if (!BOOKS[book]) book = 'personal';
+  book = localStorage.getItem('money-book') || 'simple';
+  if (!BOOKS[book] && book !== 'simple') book = 'simple';
   render();
   if (state.entries.length >= 10 && (!state.lastBackup || Date.now() - state.lastBackup > 30 * 86400000)) setTimeout(() => toast('💾 Tip: take a backup from ⚙️'), 1500);
 })();
