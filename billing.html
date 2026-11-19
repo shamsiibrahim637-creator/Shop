@@ -1704,7 +1704,7 @@ function renderBillItems(){
           Rs.
           <input type="number" class="rate-input" data-idx="${idx}" value="${item.rate}" style="width:64px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
           ×
-          <input type="number" class="qty-input" data-idx="${idx}" value="${item.qty}" min="1" style="width:50px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          <input type="number" class="qty-input" data-idx="${idx}" value="${item.qty}" min="1" style="width:50px; text-align:center; background:var(--navy-2); border:1.5px solid ${item.qty > 1 ? '#ff3b30' : 'var(--brass)'}; color:${item.qty > 1 ? '#ff3b30' : 'var(--cream)'}; border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
           pcs = <span style="color:var(--cream);">${money(amount)}</span>
         </p>
       </div>
@@ -2248,7 +2248,9 @@ function buildBillPDFDoc(bill){
     }
     const sizeLines = doc.splitTextToSize(String(item.size || '-'), 26).slice(0, 2);
     doc.text(sizeLines, 108, y+11);
+    if (Number(item.qty) > 1) doc.setTextColor(255, 0, 0);
     doc.text(String(item.qty), 138, y+14);
+    doc.setTextColor(0, 0, 0);
     doc.text(String(item.rate), 158, y+14);
     doc.text(String(Math.round(amount*100)/100), pageWidth-18, y+14, { align: 'right' });
 
