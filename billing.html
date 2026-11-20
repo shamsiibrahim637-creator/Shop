@@ -1053,6 +1053,12 @@ window.__switchView = function(){};
           <input type="number" id="manual-rate" placeholder="0">
         </div>
       </div>
+      <div class="field">
+        <label>Photo (optional)</label>
+        <button type="button" id="manual-photo-btn" class="btn btn-full">📷 Add photo</button>
+        <input type="file" id="manual-photo" accept="image/*" style="display:none;">
+        <div id="manual-photo-prev" style="margin-top:8px;"></div>
+      </div>
       <button type="button" id="add-manual-item-btn" class="btn btn-gold btn-full">+ Add to Bill</button>
     </div>
 
@@ -1674,12 +1680,50 @@ function renderProductResults(){
 productSearch.addEventListener('input', renderProductResults);
 
 // ---- Manual entry ----
+const manualPhotoBtn = document.getElementById('manual-photo-btn');
+const manualPhotoInput = document.getElementById('manual-photo');
+const manualPhotoPrev = document.getElementById('manual-photo-prev');
+let manualPhotoData = ''; // small JPEG data of the photo chosen for the manual item
+function shrinkImage(file, max){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = reject;
+    r.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const sc = Math.min(1, max / Math.max(im.width, im.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(im.width * sc)); c.height = Math.max(1, Math.round(im.height * sc));
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', 0.8));
+      };
+      im.onerror = reject;
+      im.src = r.result;
+    };
+    r.readAsDataURL(file);
+  });
+}
+function showManualPhoto(){
+  manualPhotoPrev.innerHTML = manualPhotoData
+    ? '<img src="' + manualPhotoData + '" style="width:70px;height:70px;border-radius:6px;object-fit:cover;border:1.5px solid var(--brass);"> <button type="button" id="manual-photo-clear" class="btn ghost" style="margin-left:8px;">✕ Remove photo</button>'
+    : '';
+}
+manualPhotoBtn.addEventListener('click', () => manualPhotoInput.click());
+manualPhotoInput.addEventListener('change', async () => {
+  const f = manualPhotoInput.files[0]; if (!f) return;
+  try { manualPhotoData = await shrinkImage(f, 400); showManualPhoto(); }
+  catch (e) { alert('Could not read this photo. Please try another.'); }
+});
+manualPhotoPrev.addEventListener('click', (e) => {
+  if (e.target && e.target.id === 'manual-photo-clear'){ manualPhotoData = ''; manualPhotoInput.value = ''; showManualPhoto(); }
+});
 addManualItemBtn.addEventListener('click', () => {
   const name = manualName.value.trim();
   const qty = Math.max(1, parseInt(manualQty.value, 10) || 1);
   const rate = parseFloat(manualRate.value) || 0;
   if (!name){ alert('Please enter an item name.'); return; }
-  currentItems.push({ name, size: '', qty, rate });
+  currentItems.push({ name, size: '', qty, rate, photo: manualPhotoData || '' });
+  manualPhotoData = ''; manualPhotoInput.value = ''; showManualPhoto();
   manualName.value = '';
   manualQty.value = 1;
   manualRate.value = '';
