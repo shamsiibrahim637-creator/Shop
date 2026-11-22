@@ -588,8 +588,11 @@ function catStock(it){
   const t = it.link.typeId ? (ci.types || []).find(x => x.id === it.link.typeId) : null;
   if (t && Array.isArray(t.variations) && t.variations.length) vars = t.variations;
   const valid = vars.filter(v => v.code || v.inch || v.price);
-  return { outKeys: new Set(vars.filter(v => v.outOfStock).map(outKey)), allOut: valid.length > 0 && valid.every(v => v.outOfStock) };
+  const priceMap = new Map(vars.filter(v => v.price !== undefined && v.price !== '').map(v => [outKey(v), v.price]));
+  return { outKeys: new Set(vars.filter(v => v.outOfStock).map(outKey)), allOut: valid.length > 0 && valid.every(v => v.outOfStock), priceMap };
 }
+// MRP shown: the Catalogue's current price for this size (if linked), else the copy saved with the purchase entry
+function liveMrp(it, s){ const st = catStock(it); if (st && st.priceMap.has(outKey(s))) return st.priceMap.get(outKey(s)); return s.mrp; }
 // when the phone comes back to the app, re-check the Catalogue stock
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && items.length){ stockCache.clear(); ensureStock(); } });
 
@@ -613,7 +616,7 @@ function render(){
         <p class="nm">${esc(it.name)}</p>
         ${st && st.allOut ? '<span class="vend" style="background:#4a1212; color:#ff8a7a; border-color:#a33;">⛔ OUT OF STOCK (Catalogue)</span>' : ''}
         ${it.vendor ? `<span class="vend">🏭 ${esc(it.vendor)}</span>` : '<span class="vend" style="background:#3a2a10; color:#f5c46b; border-color:#b8912f;">NO VENDOR</span>'}
-        ${(it.sizes || []).map(s => { const so = !!(st && st.outKeys.has(outKey(s))); return `<div class="sz"${so ? ' style="opacity:0.6;"' : ''}><span>${esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard')}${s.mrp ? `<br><span class="mrp">MRP ${esc(money(s.mrp))}</span>` : ''}${so ? '<br><b style="color:#ff6b5b;">⛔ OUT OF STOCK</b>' : ''}</span><span class="pp">${money(s.price) || '—'}</span></div>`; }).join('')}
+        ${(it.sizes || []).map(s => { const so = !!(st && st.outKeys.has(outKey(s))); return `<div class="sz"${so ? ' style="opacity:0.6;"' : ''}><span>${esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard')}${liveMrp(it, s) ? `<br><span class="mrp">MRP ${esc(money(liveMrp(it, s)))}</span>` : ''}${so ? '<br><b style="color:#ff6b5b;">⛔ OUT OF STOCK</b>' : ''}</span><span class="pp">${money(s.price) || '—'}</span></div>`; }).join('')}
         ${it.note ? `<div class="note" style="margin-top:5px;">📝 ${esc(it.note)}</div>` : ''}
         <div class="note" style="margin-top:5px; font-size:11px;">${it.link ? '🔗 ' + esc(it.link.catName || 'Catalogue') + ' · ' : ''}${esc(fmtDate(it.updated))}</div>
       </div>
@@ -778,7 +781,7 @@ $('pdf-btn').onclick = async () => {
   doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.text('PURCHASE RATES' + (vendorFilter ? ' — ' + vendorFilter : ''), W / 2, y, { align: 'center' }); y += 5;
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(110, 110, 110); doc.text('Made ' + new Date().toLocaleDateString('en-IN') + ' · private — not for customers', W / 2, y + 1, { align: 'center' }); y += 8;
   for (const it of list){
-    const sz = (it.sizes || []).map(s => [s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' ') + '  =  ' + (money(s.price).replace('₹', 'Rs.') || '-') + (s.mrp ? '   (MRP Rs.' + String(s.mrp).replace(/[^0-9.]/g, '') + ')' : ''));
+    const sz = (it.sizes || []).map(s => [s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' ') + '  =  ' + (money(s.price).replace('₹', 'Rs.') || '-') + (liveMrp(it, s) ? '   (MRP Rs.' + String(liveMrp(it, s)).replace(/[^0-9.]/g, '') + ')' : ''));
     const h = Math.max(26, 8 + sz.length * 5 + (it.note ? 5 : 0));
     if ((it.vendor || '') !== lastVendor){
       if (y + 10 + h > 285){ doc.addPage(); y = 16; }
