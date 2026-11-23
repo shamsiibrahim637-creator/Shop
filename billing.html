@@ -1731,12 +1731,22 @@ addManualItemBtn.addEventListener('click', () => {
 });
 
 // ---- Bill items list & totals ----
+// Per-item discount: item.gross = normal rate you type, item.disc = % off, item.rate = the rate the bill uses (net).
+// The PDF and WhatsApp show only item.rate, so the discount is hidden from the customer.
+function applyItemRate(item){
+  const g = item.gross !== undefined ? item.gross : item.rate;
+  const d = Math.min(100, Math.max(0, Number(item.disc) || 0));
+  item.gross = g; item.disc = d;
+  item.rate = Math.round(g * (100 - d)) / 100;
+}
 function renderBillItems(){
   billItemsList.innerHTML = '';
   noItemsMsg.style.display = currentItems.length === 0 ? 'block' : 'none';
 
   currentItems.forEach((item, idx) => {
     const amount = item.qty * item.rate;
+    const gross = item.gross !== undefined ? item.gross : item.rate;
+    const disc = Number(item.disc) || 0;
     const row = document.createElement('div');
     row.className = 'item-row';
     row.innerHTML = `
@@ -1746,7 +1756,9 @@ function renderBillItems(){
         ${item.size ? `<p class="isize">${escapeHtml(item.size)}</p>` : ''}
         <p style="font-family:Arial,sans-serif; font-size:14px; font-weight:700; color:var(--brass-light); margin:6px 0 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
           Rs.
-          <input type="number" class="rate-input" data-idx="${idx}" value="${item.rate}" style="width:64px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          <input type="number" class="rate-input" data-idx="${idx}" value="${gross}" style="width:64px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          <input type="number" class="disc-input" data-idx="${idx}" value="${disc}" min="0" max="100" placeholder="0" title="Discount % for this item" style="width:48px; text-align:center; background:var(--navy-2); border:1.5px solid var(--brass); color:var(--cream); border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
+          % off${disc > 0 ? ' → Rs. ' + item.rate : ''}
           ×
           <input type="number" class="qty-input" data-idx="${idx}" value="${item.qty}" min="1" style="width:50px; text-align:center; background:var(--navy-2); border:1.5px solid ${item.qty > 1 ? '#ff3b30' : 'var(--brass)'}; color:${item.qty > 1 ? '#ff3b30' : 'var(--cream)'}; border-radius:5px; padding:5px; font-family:Arial,sans-serif; font-weight:800; font-size:13px;">
           pcs = <span style="color:var(--cream);">${money(amount)}</span>
@@ -1761,7 +1773,16 @@ function renderBillItems(){
     inp.addEventListener('change', () => {
       const idx = Number(inp.getAttribute('data-idx'));
       const val = parseFloat(inp.value) || 0;
-      currentItems[idx].rate = val;
+      currentItems[idx].gross = val;
+      applyItemRate(currentItems[idx]);
+      renderBillItems();
+    });
+  });
+  document.querySelectorAll('.disc-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const idx = Number(inp.getAttribute('data-idx'));
+      currentItems[idx].disc = Math.min(100, Math.max(0, parseFloat(inp.value) || 0));
+      applyItemRate(currentItems[idx]);
       renderBillItems();
     });
   });
