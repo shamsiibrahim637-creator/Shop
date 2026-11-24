@@ -2023,6 +2023,13 @@ function resetBillForm(nextInvoiceNoValue){
 }
 
 let billSaving = false;
+// Always start from the LATEST saved bill list, not the copy in memory. A stale
+// copy (e.g. a live update that arrived late) used to be written back and
+// wiped out bills that had just been saved or edited.
+async function freshBills(){
+  const r = await storage.get('all-bills');
+  return r && r.value ? JSON.parse(r.value) : [];
+}
 let lastSavedMadeBy = null;
 saveBillBtn.addEventListener('click', async () => {
   if (billSaving) return; // ignore double-taps while a save is in progress
@@ -2072,7 +2079,7 @@ saveBillBtn.addEventListener('click', async () => {
 
     // Work on a copy — `bills` is only replaced once the save succeeds, so
     // a failed save can be retried without losing or duplicating the bill.
-    let newBills = bills.slice();
+    let newBills = await freshBills(); // throws if the cloud can't be read -> bill is NOT saved, nothing overwritten
     const wasEditing = !!editingBillId;
     if (wasEditing){
       const idx = newBills.findIndex(b => b.id === editingBillId);
@@ -2587,6 +2594,7 @@ let billsUnsub = null;
 function attachBillsListener(){
   if (billsUnsub) billsUnsub();
   billsUnsub = storage.onChange('all-bills', (value) => {
+    if (billSaving) return; // our own save will refresh the list when it finishes
     bills = value ? JSON.parse(value) : [];
     noteKnownPhotoKeys(bills);
     renderBillsList();
@@ -2867,7 +2875,8 @@ function renderBillsList(){
       if (!bill) return;
       const ok = confirm('Delete Invoice #' + bill.invoiceNo + '? This cannot be undone.');
       if (!ok) return;
-      bills = bills.filter(b => b.id !== id);
+      const latest = await freshBills();
+      bills = latest.filter(b => b.id !== id);
       await storage.set('all-bills', JSON.stringify(bills));
       renderBillsList();
     });
