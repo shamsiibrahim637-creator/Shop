@@ -1315,6 +1315,11 @@ const billStatusMsg = document.getElementById('bill-status-msg');
 const billSearch = document.getElementById('bill-search');
 const emptyBills = document.getElementById('empty-bills');
 let billStatusFilter = 'all';
+// History shows the newest bills first, a page at a time, so a long history stays quick.
+const BILLS_PAGE = 60;
+let billsShownCount = BILLS_PAGE;
+let lastBillsValue = null;
+let billsViewKey = '';
 const billsList = document.getElementById('bills-list');
 
 // ---- Shop settings ----
@@ -2595,6 +2600,8 @@ function attachBillsListener(){
   if (billsUnsub) billsUnsub();
   billsUnsub = storage.onChange('all-bills', (value) => {
     if (billSaving) return; // our own save will refresh the list when it finishes
+    if (value && value === lastBillsValue) return; // nothing changed -> no redraw
+    lastBillsValue = value || '';
     bills = value ? JSON.parse(value) : [];
     noteKnownPhotoKeys(bills);
     renderBillsList();
@@ -2735,6 +2742,8 @@ customerPickerSearch.addEventListener('input', renderCustomerPickerResults);
 // Bill History refreshes automatically, no manual refresh needed.
 function renderBillsList(){
   const query = billSearch.value.trim().toLowerCase();
+  const viewKey = query + '|' + billStatusFilter;
+  if (viewKey !== billsViewKey){ billsViewKey = viewKey; billsShownCount = BILLS_PAGE; }
   let filtered = query
     ? bills.filter(b => String(b.invoiceNo).includes(query) || (b.customerName || '').toLowerCase().includes(query) || (b.customerPhone || '').toLowerCase().includes(query))
     : bills;
@@ -2747,7 +2756,8 @@ function renderBillsList(){
   billsList.innerHTML = '';
   emptyBills.style.display = filtered.length === 0 ? 'block' : 'none';
 
-  filtered.forEach(bill => {
+  const shownList = filtered.slice(0, billsShownCount);
+  shownList.forEach(bill => {
     const div = document.createElement('div');
     div.className = 'bill-card';
     div.innerHTML = `
@@ -2775,6 +2785,15 @@ function renderBillsList(){
     `;
     billsList.appendChild(div);
   });
+  if (filtered.length > shownList.length){
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'btn ghost';
+    more.style.width = '100%';
+    more.textContent = 'Show more bills (' + (filtered.length - shownList.length) + ' older)';
+    more.addEventListener('click', () => { billsShownCount += BILLS_PAGE; renderBillsList(); });
+    billsList.appendChild(more);
+  }
 
   document.querySelectorAll('.toggle-paid-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
