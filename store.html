@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Turning Point Trophy — order trophies, medals and cable ties online">
+<title>Turning Point Trophy — Online Store</title>
+<style>
+  :root { --navy:#0f1e33; --navy-2:#17294a; --brass:#c9a646; --cream:#f7f1e3; --muted:#9aa6bd; --red:#e0705a; --green:#3fae6a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: Arial, Helvetica, sans-serif; background:var(--navy); color:var(--cream); }
+  header { position:sticky; top:0; z-index:10; background:var(--navy-2); border-bottom:2px solid var(--brass); padding:12px 16px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  header h1 { font-size:18px; margin:0; color:var(--brass); letter-spacing:.5px; }
+  header small { color:var(--muted); display:block; font-size:12px; }
+  .cart-btn { background:var(--brass); color:var(--navy); border:none; border-radius:8px; padding:10px 14px; font-weight:800; font-size:15px; cursor:pointer; white-space:nowrap; }
+  main { padding:14px 16px 40px; max-width:1000px; margin:0 auto; }
+  .tabs { display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; margin-bottom:6px; }
+  .tab { flex:0 0 auto; background:var(--navy-2); color:var(--cream); border:1.5px solid #2c3f63; border-radius:20px; padding:8px 14px; font-weight:700; cursor:pointer; }
+  .tab.on { background:var(--brass); color:var(--navy); border-color:var(--brass); }
+  .search { width:100%; padding:12px; border-radius:8px; border:1.5px solid #2c3f63; background:var(--navy-2); color:var(--cream); font-size:16px; margin:8px 0 14px; }
+  .grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  @media (min-width:700px){ .grid { grid-template-columns:repeat(4,1fr); } }
+  .card { background:var(--navy-2); border:1.5px solid #2c3f63; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; cursor:pointer; }
+  .card.oos { opacity:.55; }
+  .card .pic { width:100%; aspect-ratio:1/1; background:#0b1628; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .card .pic img { width:100%; height:100%; object-fit:cover; }
+  .card .info { padding:10px; }
+  .card .nm { font-weight:800; font-size:14px; line-height:1.25; word-break:break-word; }
+  .card .pr { color:var(--brass); font-weight:800; margin-top:4px; font-size:15px; }
+  .badge { display:inline-block; background:#4a1212; color:#ff8a7a; border-radius:5px; padding:2px 6px; font-size:11px; font-weight:800; margin-top:4px; }
+  .empty { text-align:center; color:var(--muted); padding:40px 10px; }
+  /* dialogs */
+  .sheet-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:flex-end; justify-content:center; z-index:20; }
+  .sheet-bg.open { display:flex; }
+  .sheet { background:var(--navy-2); border-top:2px solid var(--brass); border-radius:16px 16px 0 0; width:100%; max-width:640px; max-height:92vh; overflow-y:auto; padding:18px 16px 26px; }
+  .sheet h2 { margin:0 0 10px; color:var(--brass); font-size:18px; }
+  .sheet .x { float:right; background:none; border:none; color:var(--cream); font-size:24px; cursor:pointer; }
+  .pimg { width:100%; max-height:280px; object-fit:contain; background:#0b1628; border-radius:10px; }
+  .lbl { color:var(--muted); font-size:13px; margin:12px 0 6px; font-weight:700; }
+  .opts { display:flex; flex-wrap:wrap; gap:8px; }
+  .opt { background:var(--navy); color:var(--cream); border:1.5px solid #2c3f63; border-radius:8px; padding:9px 12px; cursor:pointer; font-weight:700; font-size:14px; }
+  .opt.on { border-color:var(--brass); background:#2a2412; color:var(--brass); }
+  .opt[disabled] { opacity:.4; text-decoration:line-through; cursor:not-allowed; }
+  .qty { display:flex; align-items:center; gap:12px; margin-top:12px; }
+  .qty button { width:44px; height:44px; border-radius:8px; border:1.5px solid var(--brass); background:var(--navy); color:var(--brass); font-size:22px; font-weight:800; cursor:pointer; }
+  .qty span { font-size:20px; font-weight:800; min-width:30px; text-align:center; }
+  .btn { width:100%; padding:14px; border:none; border-radius:10px; background:var(--brass); color:var(--navy); font-weight:800; font-size:16px; cursor:pointer; margin-top:14px; }
+  .btn.ghost { background:none; border:1.5px solid var(--brass); color:var(--brass); }
+  .btn[disabled] { opacity:.5; }
+  .line { display:flex; gap:10px; align-items:center; border-bottom:1px solid #2c3f63; padding:10px 0; }
+  .line .t { flex:1; font-size:14px; }
+  .line .t small { color:var(--muted); display:block; }
+  .line .amt { font-weight:800; color:var(--brass); white-space:nowrap; }
+  .line .rm { background:none; border:none; color:var(--red); font-size:20px; cursor:pointer; padding:4px 8px; }
+  .total { display:flex; justify-content:space-between; font-size:19px; font-weight:800; margin:14px 0 6px; }
+  .field { margin-top:10px; }
+  .field label { display:block; color:var(--muted); font-size:13px; font-weight:700; margin-bottom:4px; }
+  .field input, .field textarea { width:100%; padding:12px; border-radius:8px; border:1.5px solid #2c3f63; background:var(--navy); color:var(--cream); font-size:16px; font-family:Arial,sans-serif; }
+  .pay { display:flex; gap:8px; flex-wrap:wrap; }
+  .msg { margin-top:10px; font-size:14px; color:var(--muted); min-height:18px; }
+  .msg.bad { color:var(--red); }
+  .msg.good { color:var(--green); }
+  footer { text-align:center; color:var(--muted); font-size:12px; padding:20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>TURNING POINT TROPHY</h1>
+    <small>Trophies · Medals · Acrylic · Cable ties</small>
+  </div>
+  <button class="cart-btn" id="cart-open">🛒 Cart (<span id="cart-count">0</span>)</button>
+</header>
+
+<main>
+  <div class="tabs" id="tabs"></div>
+  <input class="search" id="search" type="search" placeholder="Search by model no. or name">
+  <div id="status" class="msg">Loading products…</div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none;">No products found.</div>
+</main>
+
+<footer>
+  Order on WhatsApp: <a href="https://wa.me/918850140327" style="color:var(--brass);">+91 88501 40327</a><br>
+  Prices are shown in rupees (₹). Final bill is confirmed by the shop.
+</footer>
+
+<!-- product sheet -->
+<div class="sheet-bg" id="prod-bg">
+  <div class="sheet" id="prod-sheet"></div>
+</div>
+
+<!-- cart sheet -->
+<div class="sheet-bg" id="cart-bg">
+  <div class="sheet" id="cart-sheet"></div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+<script>
+// Same shop database as the apps (read-only for products; orders are only ADDED).
+const firebaseConfig = {
+  apiKey: "AIzaSyCAhRZkey-RTg2Xn_73EUCtd6dODXCUMHU",
+  authDomain: "shopsync-5eacc.firebaseapp.com",
+  projectId: "shopsync-5eacc",
+  storageBucket: "shopsync-5eacc.firebasestorage.app",
+  messagingSenderId: "751907155720",
+  appId: "1:751907155720:web:e81466b303562c70fc06bd"
+};
+const SHOP_WA = '918850140327';
+const CART_KEY = 'tp-store-cart';
+
+let db = null;
+try { firebase.initializeApp(firebaseConfig); db = firebase.firestore(); } catch (e) { console.error(e); }
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const rupee = (n) => '₹' + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-IN');
+
+// ---------- cloud reads (products only) ----------
+async function getValue(key){
+  const snap = await db.collection('catalogue_kv').doc(key.replace(/\//g, '_SLASH_')).get();
+  if (!snap.exists) return null;
+  const d = snap.data();
+  if (!d.chunked) return d.value;
+  const parts = await Promise.all(Array.from({ length: d.chunkCount || 0 }, (_, i) =>
+    db.collection('catalogue_kv').doc(key.replace(/\//g, '_SLASH_') + '__chunk' + i).get()));
+  return parts.map(p => (p.exists ? p.data().part : '')).join('');
+}
+async function listItems(catId){
+  const FP = firebase.firestore.FieldPath.documentId();
+  const start = ('item:' + catId + ':').replace(/\//g, '_SLASH_');
+  const snap = await db.collection('catalogue_kv').where(FP, '>=', start).where(FP, '<', start + '').get();
+  const out = [];
+  for (const d of snap.docs){
+    if (d.id.indexOf('__chunk') !== -1) continue;
+    const data = d.data() || {};
+    const val = data.chunked ? await getValue(d.id.replace(/_SLASH_/g, '/')) : data.value;
+    if (!val) continue;
+    try { out.push(JSON.parse(val)); } catch (e) {}
+  }
+  return out;
+}
+
+// ---------- state ----------
+let catalogues = [];           // [{id,name}]
+let products = {};             // catId -> [item]
+let activeCat = 'ALL';
+let cart = [];                 // [{key, catId, itemId, name, typeId, typeName, code, inch, price, qty, thumb}]
+try { cart = JSON.parse(localStorage.getItem(CART_KEY) || '[]') || []; } catch (e) { cart = []; }
+function saveCart(){ try { localStorage.setItem(CART_KEY, JSON.stringify(cart)); } catch (e) {} renderCartCount(); }
+
+// Products of a catalogue as list of sellable "looks": each item, or each of its types.
+function looksOf(catId, it){
+  const out = [];
+  const sizesOf = (vars) => (vars || []).filter(v => (v.code || v.inch || v.price));
+  const base = sizesOf(it.variations);
+  out.push({ catId, itemId: it.id, name: it.name || '', typeId: '', typeName: '', thumb: it.thumb || '', sizes: base });
+  (it.types || []).forEach(t => {
+    const own = sizesOf(t.variations);
+    out.push({ catId, itemId: it.id, name: it.name || '', typeId: t.id, typeName: t.name || '', thumb: t.thumb || it.thumb || '', sizes: own.length ? own : base });
+  });
+  return out;
+}
+function allLooks(){
+  const list = [];
+  catalogues.forEach(c => (products[c.id] || []).forEach(it => looksOf(c.id, it).forEach(l => list.push({ ...l, cat: c.name }))));
+  return list;
+}
+function looksIn(catId){
+  return allLooks().filter(l => catId === 'ALL' || l.catId === catId);
+}
+
+// ---------- catalogue load ----------
+async function loadStore(){
+  $('status').textContent = 'Loading products…';
+  try {
+    if (!db) throw new Error('no connection');
+    const listRaw = await getValue('catalogue-list');
+    catalogues = listRaw ? JSON.parse(listRaw) : [];
+    for (const c of catalogues){
+      products[c.id] = (await listItems(c.id)).filter(it => it && it.id);
+    }
+    renderTabs();
+    renderGrid();
+    $('status').textContent = '';
+  } catch (e) {
+    console.error(e);
+    $('status').className = 'msg bad';
+    $('status').textContent = 'Could not load products. Check your internet and refresh the page.';
+  }
+}
+
+// ---------- rendering ----------
+function renderTabs(){
+  const names = [['ALL', 'All products']].concat(catalogues.map(c => [c.id, c.name]));
+  $('tabs').innerHTML = names.map(([id, nm]) =>
+    '<button class="tab' + (activeCat === id ? ' on' : '') + '" data-cat="' + esc(id) + '">' + esc(nm) + '</button>').join('');
+  $('tabs').querySelectorAll('.tab').forEach(b => b.onclick = () => { activeCat = b.dataset.cat; renderTabs(); renderGrid(); });
+}
+function inStock(look){ return look.sizes.some(s => !s.outOfStock); }
+function minPrice(look){
+  const p = look.sizes.filter(s => !s.outOfStock && s.price !== '' && s.price != null).map(s => Number(s.price)).filter(n => !isNaN(n));
+  return p.length ? Math.min(...p) : null;
+}
+function renderGrid(){
+  const q = $('search').value.trim().toLowerCase();
+  let list = looksIn(activeCat);
+  if (q) list = list.filter(l => (l.name + ' ' + l.typeName + ' ' + l.cat).toLowerCase().includes(q));
+  $('empty').style.display = list.length ? 'none' : 'block';
+  $('grid').innerHTML = list.map((l, i) => {
+    const ok = inStock(l); const mp = minPrice(l);
+    return '<div class="card' + (ok ? '' : ' oos') + '" data-i="' + i + '">' +
+      '<div class="pic">' + (l.thumb ? '<img src="' + esc(l.thumb) + '" alt="">' : '<span style="color:var(--muted)">No photo</span>') + '</div>' +
+      '<div class="info"><div class="nm">' + esc(l.name) + (l.typeName ? ' <span style="color:var(--brass)">· ' + esc(l.typeName) + '</span>' : '') + '</div>' +
+      (ok && mp != null ? '<div class="pr">from ' + rupee(mp) + '</div>' : '') +
+      (ok ? '' : '<span class="badge">OUT OF STOCK</span>') + '</div></div>';
+  }).join('');
+  $('grid').querySelectorAll('.card').forEach(c => c.onclick = () => openProduct(list[Number(c.dataset.i)]));
+}
+
+// ---------- product sheet ----------
+let pick = null;
+function openProduct(look){
+  if (!look) return;
+  pick = { look, size: null, qty: 1 };
+  const avail = look.sizes.filter(s => !s.outOfStock);
+  if (avail.length === 1) pick.size = avail[0];
+  drawProduct();
+  $('prod-bg').classList.add('open');
+}
+function drawProduct(){
+  const l = pick.look;
+  const sizes = l.sizes;
+  $('prod-sheet').innerHTML =
+    '<button class="x" id="prod-x" aria-label="Close">✕</button>' +
+    '<h2>' + esc(l.name) + (l.typeName ? ' · ' + esc(l.typeName) : '') + '</h2>' +
+    (l.thumb ? '<img class="pimg" src="' + esc(l.thumb) + '" alt="">' : '') +
+    '<div class="lbl">Size</div>' +
+    '<div class="opts">' + (sizes.length ? sizes.map((s, i) =>
+      '<button class="opt' + (pick.size === s ? ' on' : '') + '" data-s="' + i + '"' + (s.outOfStock ? ' disabled' : '') + '>' +
+      esc([s.code, s.inch ? s.inch + '"' : ''].filter(Boolean).join(' · ') || 'Standard') + ' — ' + (s.price !== '' && s.price != null ? rupee(s.price) : '') +
+      (s.outOfStock ? ' (out)' : '') + '</button>').join('') : '<span style="color:var(--muted)">Ask on WhatsApp for sizes and price</span>') + '</div>' +
+    '<div class="qty"><button id="q-minus">−</button><span>' + pick.qty + '</span><button id="q-plus">+</button></div>' +
+    '<button class="btn" id="add-cart"' + (pick.size || !sizes.length ? '' : ' disabled') + '>Add to cart' + (pick.size ? ' — ' + rupee(pick.size.price * pick.qty) : '') + '</button>' +
+    '<div class="msg" id="prod-msg"></div>';
+  $('prod-x').onclick = () => $('prod-bg').classList.remove('open');
+  $('prod-sheet').querySelectorAll('[data-s]').forEach(b => b.onclick = () => { pick.size = sizes[Number(b.dataset.s)]; drawProduct(); });
+  $('q-minus').onclick = () => { pick.qty = Math.max(1, pick.qty - 1); drawProduct(); };
+  $('q-plus').onclick = () => { pick.qty = Math.min(999, pick.qty + 1); drawProduct(); };
+  const add = $('add-cart');
+  if (add) add.onclick = () => {
+    if (!sizes.length){ $('prod-msg').textContent = 'Please order on WhatsApp for this item.'; return; }
+    if (!pick.size){ $('prod-msg').textContent = 'Please choose a size.'; return; }
+    const key = l.catId + '|' + l.itemId + '|' + l.typeId + '|' + (pick.size.code || '') + '|' + (pick.size.inch || '');
+    const found = cart.find(c => c.key === key);
+    if (found) found.qty += pick.qty; else cart.push({ key, catId: l.catId, itemId: l.itemId, name: l.name, typeName: l.typeName, code: pick.size.code || '', inch: pick.size.inch || '', price: Number(pick.size.price) || 0, qty: pick.qty, thumb: l.thumb || '' });
+    saveCart();
+    $('prod-bg').classList.remove('open');
+    toast('Added to cart ✓');
+  };
+}
+
+// ---------- cart ----------
+function renderCartCount(){ $('cart-count').textContent = cart.reduce((a, c) => a + c.qty, 0); }
+function cartTotal(){ return cart.reduce((a, c) => a + c.price * c.qty, 0); }
+function openCart(){
+  drawCart();
+  $('cart-bg').classList.add('open');
+}
+function drawCart(msg){
+  if (!cart.length){
+    $('cart-sheet').innerHTML = '<button class="x" id="cart-x">✕</button><h2>Your cart</h2><div class="empty">Your cart is empty.</div>' +
+      (msg ? '<div class="msg ' + (msg.cls || '') + '">' + esc(msg.text) + '</div>' : '');
+    $('cart-x').onclick = () => $('cart-bg').classList.remove('open');
+    return;
+  }
+  $('cart-sheet').innerHTML =
+    '<button class="x" id="cart-x">✕</button><h2>Your cart</h2>' +
+    cart.map((c, i) => '<div class="line"><div class="t">' + esc(c.name) + (c.typeName ? ' · ' + esc(c.typeName) : '') +
+      '<small>' + esc([c.code, c.inch ? c.inch + '"' : ''].filter(Boolean).join(' · ')) + ' · ' + rupee(c.price) + ' × ' + c.qty + '</small></div>' +
+      '<div class="amt">' + rupee(c.price * c.qty) + '</div><button class="rm" data-rm="' + i + '" aria-label="Remove">🗑</button></div>').join('') +
+    '<div class="total"><span>Total</span><span>' + rupee(cartTotal()) + '</span></div>' +
+    '<div class="field"><label>Your name *</label><input id="o-name" autocomplete="name"></div>' +
+    '<div class="field"><label>Mobile number *</label><input id="o-phone" type="tel" inputmode="tel" autocomplete="tel"></div>' +
+    '<div class="field"><label>Delivery address *</label><textarea id="o-addr" rows="2"></textarea></div>' +
+    '<div class="field"><label>Note (optional)</label><input id="o-note"></div>' +
+    '<div class="field"><label>Payment</label><div class="pay" id="o-pay">' +
+      '<button class="opt on" data-p="Cash on delivery">Cash on delivery</button>' +
+      '<button class="opt" data-p="UPI / bank transfer">UPI / bank transfer</button></div></div>' +
+    '<button class="btn" id="place-order">Place order on WhatsApp</button>' +
+    '<div class="msg' + (msg ? ' ' + msg.cls : '') + '" id="cart-msg">' + (msg ? esc(msg.text) : 'Shop will confirm the order and total on WhatsApp.') + '</div>';
+  $('cart-x').onclick = () => $('cart-bg').classList.remove('open');
+  $('cart-sheet').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { cart.splice(Number(b.dataset.rm), 1); saveCart(); drawCart(); });
+  $('o-pay').querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
+    $('o-pay').querySelectorAll('[data-p]').forEach(x => x.classList.remove('on')); b.classList.add('on');
+  });
+  $('place-order').onclick = placeOrder;
+}
+
+function payMethod(){ const b = $('o-pay').querySelector('.on'); return b ? b.dataset.p : 'Cash on delivery'; }
+
+async function placeOrder(){
+  const name = $('o-name').value.trim(), phone = $('o-phone').value.trim(), addr = $('o-addr').value.trim(), note = $('o-note').value.trim();
+  const fail = (t) => drawCartMsg({ cls: 'bad', text: t });
+  if (!name) return fail('Please enter your name.');
+  if (!/^[0-9+ ]{10,15}$/.test(phone) || phone.replace(/\D/g, '').length < 10) return fail('Please enter a valid mobile number.');
+  if (!addr) return fail('Please enter your delivery address.');
+  const btn = $('place-order'); btn.disabled = true; btn.textContent = 'Sending…';
+  const orderId = 'W' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+  const order = {
+    id: orderId, status: 'new', createdAt: new Date().toISOString(),
+    customer: { name, phone, address: addr, note },
+    payment: payMethod(),
+    items: cart.map(c => ({ name: c.name, typeName: c.typeName || '', code: c.code, inch: c.inch, price: c.price, qty: c.qty, catId: c.catId, itemId: c.itemId })),
+    total: Math.round(cartTotal() * 100) / 100
+  };
+  let saved = true;
+  try {
+    // Orders are only ADDED to the shop's database; the shop app reads them.
+    await db.collection('orders').doc(orderId).set(order);
+  } catch (e) { console.error(e); saved = false; }
+
+  const lines = order.items.map((it, i) => (i + 1) + '. ' + it.name + (it.typeName ? ' (' + it.typeName + ')' : '') +
+    (it.code || it.inch ? ' ' + [it.code, it.inch ? it.inch + '"' : ''].filter(Boolean).join(' ') : '') + ' x' + it.qty + ' = Rs.' + (it.price * it.qty));
+  const text = 'NEW ONLINE ORDER ' + orderId + '\n' + lines.join('\n') + '\nTOTAL: Rs.' + order.total +
+    '\nName: ' + name + '\nMobile: ' + phone + '\nAddress: ' + addr + (note ? '\nNote: ' + note : '') + '\nPayment: ' + order.payment;
+  window.open('https://wa.me/' + SHOP_WA + '?text=' + encodeURIComponent(text), '_blank');
+
+  if (saved){
+    cart = []; saveCart();
+    drawCart({ cls: 'good', text: 'Order ' + orderId + ' sent. Please send the WhatsApp message to confirm. Thank you!' });
+  } else {
+    btn.disabled = false; btn.textContent = 'Place order on WhatsApp';
+    drawCartMsg({ cls: 'bad', text: 'Order could not be saved online, but the WhatsApp message was opened. Please send it to confirm.' });
+  }
+}
+function drawCartMsg(msg){
+  const m = $('cart-msg');
+  if (m){ m.className = 'msg ' + (msg.cls || ''); m.textContent = msg.text; }
+  else drawCart(msg);
+}
+
+// ---------- misc ----------
+function toast(t){
+  const d = document.createElement('div');
+  d.textContent = t;
+  d.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--brass);color:var(--navy);padding:10px 16px;border-radius:8px;font-weight:800;z-index:30;';
+  document.body.appendChild(d); setTimeout(() => d.remove(), 1600);
+}
+$('cart-open').onclick = openCart;
+$('search').addEventListener('input', renderGrid);
+$('prod-bg').addEventListener('click', (e) => { if (e.target.id === 'prod-bg') $('prod-bg').classList.remove('open'); });
+$('cart-bg').addEventListener('click', (e) => { if (e.target.id === 'cart-bg') $('cart-bg').classList.remove('open'); });
+renderCartCount();
+loadStore();
+</script>
+</body>
+</html>
